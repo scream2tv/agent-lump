@@ -1,10 +1,10 @@
 # Agent Lump
 
-Trade on Cardano from your terminal. Five swap clients, one Python interface.
+AI-native trading infrastructure for Cardano. Estimate, build, sign, and submit swaps autonomously across every major DEX.
 
 ## What It Does
 
-Agent Lump routes swaps across every major Cardano DEX through four independent aggregators plus direct snek.fun bonding curve trading:
+Agent Lump is a Python trading agent that connects to five Cardano swap protocols through a unified interface. Designed to be driven by LLMs, MCP tools, or standalone scripts — it handles routing, transaction construction, local key signing, and on-chain submission without human intervention.
 
 | Client | Protocol | DEXes | API Key |
 |---|---|---|---|
