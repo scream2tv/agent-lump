@@ -1,0 +1,9 @@
+node_modules/
+dist/
+seed.hex
+.env
+contracts/managed/
+contracts/compact-contracts/
+contracts/.git/
+contracts/.gitmodules
+midnight-level-db/
