@@ -19,3 +19,13 @@ midnight-agent/.env.preprod*
 
 # Runtime logs
 *.log
+
+# Local midnight-agent work (personal experiments; not shipped)
+midnight-agent/contracts/
+midnight-agent/deploy-ui/
+midnight-agent/ui/
+midnight-agent/deploy-counter.ts
+midnight-agent/test-extrinsic.ts
+midnight-agent/proof-server.yml
+midnight-agent/src/ascend.ts
+midnight-agent/src/server.ts
