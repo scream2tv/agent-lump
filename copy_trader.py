@@ -15,27 +15,25 @@ Classification (within snek.fun txs only):
   - SELL — target sent exactly one non-ADA token to a snek.fun script
            (sell order placement).
 
-Sizing strategies (set per-run via CLI or env):
+Sizing strategies (required; pick one of each via CLI or env):
 
-  Buy modes:
-    fixed        buy exactly --buy-value ADA per copy (default 10).
+  Buy modes (--buy-mode / COPY_TRADER_BUY_MODE):
+    fixed        buy exactly --buy-value ADA per copy.
     pct-target   buy (buy-value %) of the ADA the target committed.
     pct-wallet   buy (buy-value %) of our wallet's free ADA balance.
 
-  Sell modes:
-    all          sell 100% of our holding (default).
+  Sell modes (--sell-mode / COPY_TRADER_SELL_MODE):
+    all          sell 100% of our holding (ignores --sell-value).
     pct-holding  sell (sell-value %) of our holding.
 
   Safety caps: --min-buy-ada / --max-buy-ada bound every buy regardless of
   mode.
 
 Usage:
-    python3 copy_trader.py --target <addr>                          # fixed 10 ADA, sell all
-    python3 copy_trader.py --target <addr> --buy-value 25           # fixed 25 ADA
-    python3 copy_trader.py --target <addr> --buy-mode pct-target --buy-value 20
-    python3 copy_trader.py --target <addr> --buy-mode pct-wallet --buy-value 5
-    python3 copy_trader.py --target <addr> --sell-mode pct-holding --sell-value 50
-    python3 copy_trader.py --target <addr> --dry-run
+    python3 copy_trader.py --target <addr> --buy-mode fixed --buy-value 25 --sell-mode all
+    python3 copy_trader.py --target <addr> --buy-mode pct-target --buy-value 20 --sell-mode pct-holding --sell-value 50
+    python3 copy_trader.py --target <addr> --buy-mode pct-wallet --buy-value 5 --sell-mode all
+    python3 copy_trader.py --target <addr> ... --dry-run    # log only, no submit
 """
 
 import argparse
@@ -518,6 +516,11 @@ def _env_float(name: str, default: float) -> float:
     return float(v) if v else default
 
 
+def _env_float_opt(name: str) -> Optional[float]:
+    v = os.environ.get(name)
+    return float(v) if v else None
+
+
 def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").lower() in {"1", "true", "yes"}
 
@@ -537,43 +540,49 @@ def main() -> None:
         help="Poll interval in seconds (default: 30).",
     )
 
-    # --- Buy sizing ---
+    # --- Buy sizing (required; pick a strategy) ---
     p.add_argument(
         "--buy-mode", choices=BUY_MODES,
-        default=os.environ.get("COPY_TRADER_BUY_MODE", "fixed"),
-        help="Buy sizing strategy (default: fixed).",
+        default=os.environ.get("COPY_TRADER_BUY_MODE"),
+        help=f"Buy sizing strategy (required). One of: {', '.join(BUY_MODES)}. "
+             f"Env: COPY_TRADER_BUY_MODE.",
     )
     p.add_argument(
         "--buy-value", type=float,
-        default=_env_float("COPY_TRADER_BUY_VALUE", 10.0),
-        help="Buy sizing value: ADA amount if mode=fixed; percent otherwise (default: 10).",
+        default=_env_float_opt("COPY_TRADER_BUY_VALUE"),
+        help="Buy sizing value (required): ADA amount if mode=fixed; "
+             "percent otherwise. Env: COPY_TRADER_BUY_VALUE.",
     )
-    # Back-compat shortcut: --budget-ada N == --buy-mode fixed --buy-value N.
+    # Shortcut: --budget-ada N == --buy-mode fixed --buy-value N.
     p.add_argument(
         "--budget-ada", type=float, default=None,
-        help="Alias for --buy-mode fixed --buy-value N.",
+        help="Shortcut for --buy-mode fixed --buy-value N.",
     )
     p.add_argument(
         "--min-buy-ada", type=float,
         default=_env_float("COPY_TRADER_MIN_BUY_ADA", 1.0),
-        help="Lower bound on any buy, ADA (default: 1).",
+        help="Safety cap: lower bound on any buy in ADA (default: 1). "
+             "Env: COPY_TRADER_MIN_BUY_ADA.",
     )
     p.add_argument(
         "--max-buy-ada", type=float,
         default=_env_float("COPY_TRADER_MAX_BUY_ADA", 100.0),
-        help="Upper bound on any buy, ADA (default: 100).",
+        help="Safety cap: upper bound on any buy in ADA (default: 100). "
+             "Env: COPY_TRADER_MAX_BUY_ADA.",
     )
 
-    # --- Sell sizing ---
+    # --- Sell sizing (required; pick a strategy) ---
     p.add_argument(
         "--sell-mode", choices=SELL_MODES,
-        default=os.environ.get("COPY_TRADER_SELL_MODE", "all"),
-        help="Sell sizing strategy (default: all).",
+        default=os.environ.get("COPY_TRADER_SELL_MODE"),
+        help=f"Sell sizing strategy (required). One of: {', '.join(SELL_MODES)}. "
+             f"Env: COPY_TRADER_SELL_MODE.",
     )
     p.add_argument(
         "--sell-value", type=float,
-        default=_env_float("COPY_TRADER_SELL_VALUE", 100.0),
-        help="Sell sizing percent, 0-100 (ignored if mode=all; default: 100).",
+        default=_env_float_opt("COPY_TRADER_SELL_VALUE"),
+        help="Sell sizing percent 0-100 (required unless --sell-mode=all). "
+             "Env: COPY_TRADER_SELL_VALUE.",
     )
 
     # --- Execution knobs ---
@@ -597,6 +606,30 @@ def main() -> None:
     if args.budget_ada is not None:
         args.buy_mode = "fixed"
         args.buy_value = args.budget_ada
+
+    missing = []
+    if not args.buy_mode:
+        missing.append("--buy-mode / COPY_TRADER_BUY_MODE")
+    if args.buy_value is None:
+        missing.append("--buy-value / COPY_TRADER_BUY_VALUE")
+    if not args.sell_mode:
+        missing.append("--sell-mode / COPY_TRADER_SELL_MODE")
+    if args.sell_mode and args.sell_mode != "all" and args.sell_value is None:
+        missing.append("--sell-value / COPY_TRADER_SELL_VALUE")
+    if missing:
+        print(
+            "ERROR: missing required sizing config:\n  "
+            + "\n  ".join(missing)
+            + f"\n\nBuy modes:  {', '.join(BUY_MODES)}"
+            + f"\nSell modes: {', '.join(SELL_MODES)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # sell_value is only used when mode != all; default to 0 to keep the
+    # dataclass well-formed.
+    if args.sell_value is None:
+        args.sell_value = 0.0
 
     strategy = Strategy(
         buy_mode=args.buy_mode,

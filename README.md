@@ -38,7 +38,9 @@ copies it from the configured wallet via the Snek.fun builder API. Dedupes
 by tx hash in `~/.agent-lump/copy_trader_state.json`; no backfill on cold
 start.
 
-**Sizing strategies (agent-selectable).**
+**Sizing strategies (agent-selectable — required).** Pick one buy mode and
+one sell mode per run. No strategy is assumed; the daemon refuses to start
+until both are configured (via CLI flags or `COPY_TRADER_*` env vars).
 
 | Mode          | Buy meaning                               | Sell meaning                 |
 |---------------|-------------------------------------------|------------------------------|
@@ -48,28 +50,38 @@ start.
 | `all`         | —                                         | sell 100% of our holding     |
 | `pct-holding` | —                                         | sell N% of our holding       |
 
-Every buy is clamped by `--min-buy-ada` / `--max-buy-ada` regardless of mode.
+Every buy is clamped by `--min-buy-ada` / `--max-buy-ada` safety caps
+(defaults: 1 / 100 ADA) regardless of mode.
 
-**Run.**
+**Run — explicit flags.**
 
 ```bash
-# fixed 10 ADA buy, sell 100% (defaults)
-python3 copy_trader.py --target <addr>
+# fixed ADA buy, sell everything
+python3 copy_trader.py --target <addr> \
+    --buy-mode fixed --buy-value 10 \
+    --sell-mode all
 
-# percentage of target's ADA commit
-python3 copy_trader.py --target <addr> --buy-mode pct-target --buy-value 20
+# buy a percentage of what the target committed, sell partial
+python3 copy_trader.py --target <addr> \
+    --buy-mode pct-target --buy-value 20 \
+    --sell-mode pct-holding --sell-value 50
 
-# percentage of our wallet
-python3 copy_trader.py --target <addr> --buy-mode pct-wallet --buy-value 5
+# buy a percentage of our wallet balance
+python3 copy_trader.py --target <addr> \
+    --buy-mode pct-wallet --buy-value 5 \
+    --sell-mode all
 
-# partial sells
-python3 copy_trader.py --target <addr> --sell-mode pct-holding --sell-value 50
-
-# log only, no submit
-python3 copy_trader.py --target <addr> --dry-run
+# detect only, no submit
+python3 copy_trader.py --target <addr> \
+    --buy-mode fixed --buy-value 10 --sell-mode all --dry-run
 ```
 
-**Also configurable via env** (`COPY_TRADER_*`). See `.env.example`.
+**Run — env-driven.** Set `COPY_TRADER_*` in `.env` (see `.env.example`)
+and call without sizing flags:
+
+```bash
+python3 copy_trader.py --target <addr>
+```
 
 **Limitations.** Bonding-curve tokens only (CPMM / graduated tokens not yet
 supported). Does not follow the target's in-app "splash wallet" — pass the
