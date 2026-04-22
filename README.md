@@ -124,12 +124,33 @@ impact caps, dry-run). Defaults are dry-run.
 
 ## skill: snekfun_client
 
-**Use when** you want to buy, sell, launch, or cancel orders on Snek.fun's
+**Use when** you want to buy, sell, or cancel orders on Snek.fun's
 bonding-curve tokens directly (no copy-trading).
 
-**What it does.** Wraps Snek.fun's builder API (`/trade`, `/cpmm-trade`,
-`/launch`, `/cancel`, `/sign-and-submit`) with local CBOR signing so keys
-never leave the machine. Also used as the execution layer of `copy_trader`.
+**What it does.** Covers the Snek.fun API surface with local CBOR signing
+so keys never leave the machine. Also used as the execution layer of
+`copy_trader` and `snekfun_launch`.
+
+| API area      | Endpoint                                     | Function                                        |
+|---------------|----------------------------------------------|-------------------------------------------------|
+| Trade         | `POST {builder}/trade`                       | `buy_via_builder`, `sell_via_builder`           |
+| Trade (CPMM)  | `POST {builder}/cpmm-trade`                  | `buy_cpmm_via_builder`, `sell_cpmm_via_builder` |
+| Cancel order  | `POST {builder}/cancel`                      | `cancel_via_builder`                            |
+| Sign & submit | `POST {builder}/sign-and-submit`, `/submit`  | `sign_and_submit_via_builder`, `submit_via_builder` |
+| Launch        | `POST {builder}/launch`                      | `launch_token` (see `snekfun_launch.py`)        |
+| Transfer      | `POST {builder}/transfer`                    | `transfer_via_builder`                          |
+| Balance       | `POST {balance}/balance`                     | `get_balance`                                   |
+| Vesting       | `POST {vesting}/create-lock`, `/withdraw`    | `create_vesting_lock`, `withdraw_vesting`       |
+| Pool data     | `GET {analytics}/v1/pools-feed/...`          | `get_pool_state`, `get_token_state`, `get_curve_progress`, `get_parameters` |
+
+**Docs** — official Snek.fun API reference:
+
+- Getting started: https://docs.snek.fun/getting-started/introduction
+- API overview:    https://docs.snek.fun/api-reference/overview
+
+**Host overrides** (for staging/testing):
+`SNEKFUN_BUILDER_URL`, `SNEKFUN_ANALYTICS_URL`, `SNEKFUN_BALANCE_URL`,
+`SNEKFUN_VESTING_URL`.
 
 **CLI.**
 
@@ -139,10 +160,60 @@ python3 snekfun_client.py --help
 
 Convenience scripts:
 
-- `snekfun_buy_lump.py` — one-shot buy of LUMP
-- `snekfun_swap.py`     — direct buy/sell against the bonding curve
-- `launch_woof.py`      — launch the WOOF token (reads `woof_launch.json`)
-- `monitor_woof.py`     — watch WOOF pool state after launch
+- `snekfun_swap.py`    — direct buy / sell against the bonding curve
+- `snekfun_launch.py`  — launch a new bonding-curve token (see next skill)
+
+---
+
+## skill: snekfun_launch
+
+**Use when** you want to launch a new bonding-curve token on Snek.fun with
+an optional creator buy.
+
+**What it does.** Calls the Snek.fun builder `POST /launch` endpoint with
+the provided metadata (name, ticker, description, logo, optional socials)
+and optional initial-deposit ADA. Locally signs the returned CBOR, submits
+to the network, and writes the launch metadata (assetId, policyId, tx hash,
+logo CID, etc.) to a JSON file for downstream scripts.
+
+**Docs** — launch endpoint spec:
+https://docs.snek.fun/api-reference/overview
+
+**Run.**
+
+```bash
+# Explicit flags
+python3 snekfun_launch.py \
+    --name "Example Token" --ticker EXMPL \
+    --description "A demo token" \
+    --image ./logo.png --initial-buy 25
+
+# From a JSON config
+python3 snekfun_launch.py --config launch.json
+
+# Dry-run (calls /launch but does not sign or submit)
+python3 snekfun_launch.py --config launch.json --dry-run
+```
+
+**Config file shape.**
+
+```json
+{
+  "name": "Example Token",
+  "ticker": "EXMPL",
+  "description": "A demo token on the bonding curve.",
+  "image": "./logo.png",
+  "asset_type": "Meme",
+  "launch_type": "DEFAULT",
+  "initial_buy": 25,
+  "twitter": "https://twitter.com/...",
+  "website": "https://..."
+}
+```
+
+**Constraints** (enforced client-side to match builder validation):
+`name ≤ 16`, `ticker ≤ 6 alphanumeric`, `description ≤ 500`,
+`asset_type ∈ {Meme, AI}`, `launch_type ∈ {DEFAULT, HYPED}`.
 
 ---
 
@@ -167,6 +238,8 @@ See `midnight-agent/README.md` for setup and commands.
 
 ```
 copy_trader.py            # snek.fun copy-trading daemon
+snekfun_launch.py         # snek.fun token launcher
+snekfun_swap.py           # snek.fun direct buy / sell
 swap_ada_to_token.py      # one-shot DexHunter swap
 arb_scanner.py            # cross-DEX arbitrage discovery
 arb_executor.py           # arb execution

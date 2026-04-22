@@ -70,8 +70,11 @@ DEPOSIT_ADA = 1_500_000
 
 BUILDER_URL = os.environ.get("SNEKFUN_BUILDER_URL", "https://builder.snek.fun")
 ANALYTICS_URL = os.environ.get("SNEKFUN_ANALYTICS_URL", "https://analytics.snek.fun")
+BALANCE_URL = os.environ.get("SNEKFUN_BALANCE_URL", "https://balance.snek.fun")
+VESTING_URL = os.environ.get("SNEKFUN_VESTING_URL", "https://token-vesting.snek.fun")
 
 SLIPPAGE_OPTIONS = ["15", "30", "50", "75", "infinity"]
+SIDE_OPTIONS = ["BUY", "BUY_WITH_OUTPUT", "SELL"]
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0
@@ -170,11 +173,35 @@ class SellEstimate:
 
 @dataclass
 class TradeResult:
-    """Response from the snek.fun builder API."""
+    """Response from the snek.fun builder /order endpoint."""
     trade_id: str
     cbor: str
     input_amount: str
     output_amount: str
+    beacon: Optional[str] = None
+    input_asset: Optional[str] = None
+    output_asset: Optional[str] = None
+    price_numerator: Optional[str] = None
+    price_denominator: Optional[str] = None
+    price_quote: Optional[str] = None
+    price_base: Optional[str] = None
+
+    @classmethod
+    def from_response(cls, data: dict) -> "TradeResult":
+        price = data.get("price") or {}
+        return cls(
+            trade_id=data.get("id", ""),
+            cbor=data.get("cbor", ""),
+            input_amount=data.get("inputAmount", ""),
+            output_amount=data.get("outputAmount", ""),
+            beacon=data.get("beacon"),
+            input_asset=data.get("inputAsset"),
+            output_asset=data.get("outputAsset"),
+            price_numerator=price.get("numerator"),
+            price_denominator=price.get("denominator"),
+            price_quote=data.get("priceQuote"),
+            price_base=data.get("priceBase"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -270,21 +297,37 @@ def get_pool_state(
 # ---------------------------------------------------------------------------
 
 def get_token_state(asset_id: str) -> Optional[dict]:
-    """Fetch pool state from snek.fun's analytics API.
+    """Fetch the single-token pool snapshot from the Snekfun Provider API.
 
-    Args:
-        asset_id: Full asset ID with dot separator (policyId.assetName).
+    GET {analytics}/v1/pools-feed/initial/state?asset={policyId}.{hexAssetName}
+
+    Returns {pool, metrics, info}. See:
+    https://docs.snek.fun/api-reference/snekfun-provider/http/pools-feed
     """
-    urls = [
-        f"https://be.snek.fun/api/v1/state?asset={asset_id}",
-        f"{ANALYTICS_URL}/v1/state?asset={asset_id}",
-    ]
-    for url in urls:
-        try:
-            return _get(url)
-        except Exception:
-            continue
-    return None
+    try:
+        return _get(f"{ANALYTICS_URL}/v1/pools-feed/initial/state?asset={asset_id}")
+    except Exception:
+        return None
+
+
+def get_curve_progress(asset_id: str) -> Optional[float]:
+    """Return bonding curve completion percentage for an asset.
+
+    GET {analytics}/v1/pools-feed/curve/progress?asset={assetId} -> {"percent": "75.5"}
+    """
+    try:
+        data = _get(f"{ANALYTICS_URL}/v1/pools-feed/curve/progress?asset={asset_id}")
+        return float(data.get("percent", 0))
+    except Exception:
+        return None
+
+
+def get_parameters() -> dict:
+    """Fetch builder protocol parameters (fees, limits, bonding-curve config).
+
+    GET {builder}/parameters
+    """
+    return _get(f"{BUILDER_URL}/parameters")
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +517,9 @@ def sign_transaction(unsigned_cbor_hex: str, signing_key: PaymentSigningKey) -> 
     vkey_witness = [vk.payload, signature]
     existing_witnesses = tx_array[1] if isinstance(tx_array[1], dict) else {}
     existing_vkeys = existing_witnesses.get(0, [])
+    # cbor2 can decode a CBOR set-tag (258) as a Python set/frozenset.
+    if not isinstance(existing_vkeys, list):
+        existing_vkeys = list(existing_vkeys)
     existing_vkeys.append(vkey_witness)
     existing_witnesses[0] = existing_vkeys
     tx_array[1] = existing_witnesses
@@ -536,14 +582,8 @@ def buy_via_builder(
         "utxos": sender_utxo_cbor,
     }
 
-    data = _post(f"{BUILDER_URL}/trade", payload, timeout=30)
-
-    return TradeResult(
-        trade_id=data.get("id", ""),
-        cbor=data.get("cbor", ""),
-        input_amount=data.get("inputAmount", ""),
-        output_amount=data.get("outputAmount", ""),
-    )
+    data = _post(f"{BUILDER_URL}/order", payload, timeout=30)
+    return TradeResult.from_response(data)
 
 
 def buy_cpmm_via_builder(
@@ -555,37 +595,16 @@ def buy_cpmm_via_builder(
     sender_utxo_cbor: Optional[list[str]] = None,
     blockfrost: Optional[BlockfrostClient] = None,
 ) -> TradeResult:
-    """Build a CPMM buy order for graduated tokens (completed bonding curve).
-
-    Same interface as buy_via_builder but uses the /cpmm-trade endpoint.
+    """Kept for back-compat. The official /order endpoint auto-routes bonding
+    curve vs AMM; this delegates to buy_via_builder.
     """
-    if slippage not in SLIPPAGE_OPTIONS:
-        raise ValueError(f"Slippage must be one of: {SLIPPAGE_OPTIONS}")
-
-    lovelace = int(ada_amount * 1_000_000)
-
-    if sender_utxo_cbor is None:
-        if blockfrost is None:
-            blockfrost = BlockfrostClient()
-        utxos = blockfrost.get_utxos(sender_address)
-        sender_utxo_cbor = _utxos_to_cip30_hex(utxos, sender_address)
-
-    payload = {
-        "assetId": asset_id,
-        "amount": str(lovelace),
-        "side": "BUY",
-        "changeAddress": sender_address,
-        "slippage": slippage,
-        "utxos": sender_utxo_cbor,
-    }
-
-    data = _post(f"{BUILDER_URL}/cpmm-trade", payload, timeout=30)
-
-    return TradeResult(
-        trade_id=data.get("id", ""),
-        cbor=data.get("cbor", ""),
-        input_amount=data.get("inputAmount", ""),
-        output_amount=data.get("outputAmount", ""),
+    return buy_via_builder(
+        asset_id=asset_id,
+        ada_amount=ada_amount,
+        sender_address=sender_address,
+        slippage=slippage,
+        sender_utxo_cbor=sender_utxo_cbor,
+        blockfrost=blockfrost,
     )
 
 
@@ -631,14 +650,8 @@ def sell_via_builder(
         "utxos": sender_utxo_cbor,
     }
 
-    data = _post(f"{BUILDER_URL}/trade", payload, timeout=30)
-
-    return TradeResult(
-        trade_id=data.get("id", ""),
-        cbor=data.get("cbor", ""),
-        input_amount=data.get("inputAmount", ""),
-        output_amount=data.get("outputAmount", ""),
-    )
+    data = _post(f"{BUILDER_URL}/order", payload, timeout=30)
+    return TradeResult.from_response(data)
 
 
 def sell_cpmm_via_builder(
@@ -650,9 +663,35 @@ def sell_cpmm_via_builder(
     sender_utxo_cbor: Optional[list[str]] = None,
     blockfrost: Optional[BlockfrostClient] = None,
 ) -> TradeResult:
-    """Build a CPMM sell order for graduated tokens (completed bonding curve).
+    """Kept for back-compat. The official /order endpoint auto-routes bonding
+    curve vs AMM; this delegates to sell_via_builder.
+    """
+    return sell_via_builder(
+        asset_id=asset_id,
+        token_amount=token_amount,
+        sender_address=sender_address,
+        slippage=slippage,
+        sender_utxo_cbor=sender_utxo_cbor,
+        blockfrost=blockfrost,
+    )
 
-    Same interface as sell_via_builder but uses the /cpmm-trade endpoint.
+
+# ---------------------------------------------------------------------------
+# Builder API: Cancel
+# ---------------------------------------------------------------------------
+
+def buy_with_output_via_builder(
+    *,
+    asset_id: str,
+    token_output: int,
+    sender_address: str,
+    slippage: str = "15",
+    sender_utxo_cbor: Optional[list[str]] = None,
+    blockfrost: Optional[BlockfrostClient] = None,
+) -> TradeResult:
+    """Buy a specific token output amount; builder computes ADA input.
+
+    Uses side=BUY_WITH_OUTPUT per snek.fun docs.
     """
     if slippage not in SLIPPAGE_OPTIONS:
         raise ValueError(f"Slippage must be one of: {SLIPPAGE_OPTIONS}")
@@ -665,26 +704,15 @@ def sell_cpmm_via_builder(
 
     payload = {
         "assetId": asset_id,
-        "amount": str(token_amount),
-        "side": "SELL",
+        "amount": str(token_output),
+        "side": "BUY_WITH_OUTPUT",
         "changeAddress": sender_address,
         "slippage": slippage,
         "utxos": sender_utxo_cbor,
     }
+    data = _post(f"{BUILDER_URL}/order", payload, timeout=30)
+    return TradeResult.from_response(data)
 
-    data = _post(f"{BUILDER_URL}/cpmm-trade", payload, timeout=30)
-
-    return TradeResult(
-        trade_id=data.get("id", ""),
-        cbor=data.get("cbor", ""),
-        input_amount=data.get("inputAmount", ""),
-        output_amount=data.get("outputAmount", ""),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Builder API: Cancel
-# ---------------------------------------------------------------------------
 
 def cancel_via_builder(
     *,
@@ -695,6 +723,9 @@ def cancel_via_builder(
     blockfrost: Optional[BlockfrostClient] = None,
 ) -> str:
     """Cancel a pending snek.fun order via the builder API.
+
+    NOTE: /cancel is not in the public docs at https://docs.snek.fun — it is
+    an undocumented builder endpoint. May change without notice.
 
     Returns the unsigned CBOR hex for the cancel transaction.
     """
@@ -738,6 +769,222 @@ def sign_and_submit_via_builder(
     }
     data = _post(f"{BUILDER_URL}/sign-and-submit", payload, timeout=30)
     return data.get("txHash", "")
+
+
+def sign_via_builder(
+    unsigned_cbor_hex: str,
+    witness_hex: str,
+    sender_address: str,
+) -> str:
+    """Attach a witness to a transaction without submitting.
+
+    POST {builder}/sign -> {"cbor": "<signed hex>"}
+    """
+    payload = {
+        "cbor": unsigned_cbor_hex,
+        "witness": witness_hex,
+        "changeAddress": sender_address,
+    }
+    data = _post(f"{BUILDER_URL}/sign", payload, timeout=30)
+    return data.get("cbor", "")
+
+
+def submit_via_builder(signed_cbor_hex: str) -> str:
+    """Submit a fully-signed transaction via the builder.
+
+    POST {builder}/submit -> {"txHash": "..."}
+    """
+    data = _post(f"{BUILDER_URL}/submit", {"cbor": signed_cbor_hex}, timeout=30)
+    return data.get("txHash", "")
+
+
+# ---------------------------------------------------------------------------
+# Builder API: Transfer
+# Docs: https://docs.snek.fun/api-reference/overview  (POST /transfer)
+# ---------------------------------------------------------------------------
+
+def transfer_via_builder(
+    *,
+    change_address: str,
+    dist_address: str,
+    transfer_assets: dict,
+    utxos: object,
+) -> dict:
+    """Build a transfer tx (ADA and/or tokens) between two wallets.
+
+    POST {builder}/transfer
+
+    Args:
+        change_address:  bech32 source address.
+        dist_address:    bech32 destination address.
+        transfer_assets: per the docs — either
+                         {"lovelace": "<str>" or "max"} (funding-wallet mode)
+                         or {"lovelace": "...", "assets": [...]} (splash-wallet mode).
+        utxos:           either a list of CBOR-hex strings from the sender's
+                         UTxOs, or the string "splash-wallet" to let the
+                         builder use the in-app trading wallet.
+
+    Returns the raw builder response (contains `cbor`).
+    """
+    payload = {
+        "utxos": utxos,
+        "changeAddress": change_address,
+        "distAddress": dist_address,
+        "transferAssets": transfer_assets,
+    }
+    return _post(f"{BUILDER_URL}/transfer", payload, timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# Balance API
+# Docs: https://docs.snek.fun/api-reference/overview  (POST /balance)
+# ---------------------------------------------------------------------------
+
+def get_balance(address: str) -> list[dict]:
+    """Query the snek.fun balance service for an address.
+
+    POST {balance}/balance -> {"balance": [{"policyId", "base16Name", "amount"}, ...]}
+
+    Returns the inner balance list (empty list if not found).
+    """
+    data = _post(f"{BALANCE_URL}/balance", {"address": address}, timeout=15)
+    return data.get("balance", []) or []
+
+
+# ---------------------------------------------------------------------------
+# Vesting API
+# Docs: https://docs.snek.fun/api-reference/overview
+#       (POST /create-lock, POST /withdraw on token-vesting.snek.fun)
+# ---------------------------------------------------------------------------
+
+def create_vesting_lock(
+    *,
+    address: str,
+    asset_id: str,
+    amount: int,
+    lock_end_unix: int,
+    stages_count: int,
+) -> dict:
+    """Create a token-vesting lock on snek.fun.
+
+    POST {vesting}/create-lock
+
+    Args:
+        address:       bech32 owner address.
+        asset_id:      token id as "policyId.assetName".
+        amount:        base-unit token amount to lock.
+        lock_end_unix: unix timestamp when the lock fully releases.
+        stages_count:  number of vesting stages between now and lock_end.
+    """
+    payload = {
+        "address": address,
+        "assetId": asset_id,
+        "amount": str(amount),
+        "lockEnd": int(lock_end_unix),
+        "stagesCount": int(stages_count),
+    }
+    return _post(f"{VESTING_URL}/create-lock", payload, timeout=30)
+
+
+def withdraw_vesting(*, lock_id: str, address: str) -> dict:
+    """Withdraw from a previously-created vesting lock.
+
+    POST {vesting}/withdraw
+    """
+    return _post(
+        f"{VESTING_URL}/withdraw",
+        {"id": lock_id, "address": address},
+        timeout=30,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Builder API: Launch
+# ---------------------------------------------------------------------------
+
+def launch_token(
+    *,
+    image_path: str,
+    name: str,
+    ticker: str,
+    description: str,
+    change_address: str,
+    asset_type: str = "Meme",
+    initial_deposit_lovelace: int = 0,
+    launch_type: str = "DEFAULT",
+    twitter: Optional[str] = None,
+    discord: Optional[str] = None,
+    telegram: Optional[str] = None,
+    website: Optional[str] = None,
+    sender_utxo_cbor: Optional[list[str]] = None,
+    blockfrost: Optional[BlockfrostClient] = None,
+) -> dict:
+    """Create a new bonding-curve token on snek.fun.
+
+    POST {builder}/launch (multipart/form-data). Returns:
+      {id, cbor, partial, assetId, assetSubject, policyId, logoCID, userOutputTokens}
+
+    Per docs: when `collaterals` is omitted the builder signs and returns a
+    pre-signed cbor; we still add the user's payment-key witness via
+    /sign-and-submit.
+    """
+    if len(name) > 16:
+        raise ValueError("name must be ≤16 chars")
+    if len(ticker) > 6 or not ticker.isalnum():
+        raise ValueError("ticker must be ≤6 alphanumeric chars")
+    if len(description) > 500:
+        raise ValueError("description must be ≤500 chars")
+    if asset_type not in ("Meme", "AI"):
+        raise ValueError("asset_type must be 'Meme' or 'AI'")
+    if launch_type not in ("DEFAULT", "HYPED"):
+        raise ValueError("launch_type must be 'DEFAULT' or 'HYPED'")
+
+    if sender_utxo_cbor is None:
+        if blockfrost is None:
+            blockfrost = BlockfrostClient()
+        utxos = blockfrost.get_utxos(change_address)
+        sender_utxo_cbor = _utxos_to_cip30_hex(utxos, change_address)
+
+    info: dict = {
+        "assetType": asset_type,
+        "name": name,
+        "ticker": ticker,
+        "description": description,
+        "launchType": launch_type,
+        "changeAddress": change_address,
+        "utxos": sender_utxo_cbor,
+    }
+    if initial_deposit_lovelace > 0:
+        info["initialDeposit"] = str(initial_deposit_lovelace)
+    for k, v in (("twitter", twitter), ("discord", discord),
+                 ("telegram", telegram), ("website", website)):
+        if v:
+            info[k] = v
+
+    import json as _json
+    with open(image_path, "rb") as fh:
+        files = {"image": (os.path.basename(image_path), fh.read(),
+                           _guess_mime(image_path))}
+    data = {"info": _json.dumps(info)}
+
+    for attempt in range(MAX_RETRIES):
+        resp = requests.post(
+            f"{BUILDER_URL}/launch",
+            files=files, data=data, timeout=60,
+        )
+        if resp.status_code in (429, 500, 502, 503) and attempt < MAX_RETRIES - 1:
+            time.sleep(RETRY_BACKOFF * (attempt + 1))
+            continue
+        if not resp.ok:
+            raise RuntimeError(f"/launch {resp.status_code}: {resp.text}")
+        return resp.json()
+    raise RuntimeError("/launch failed after retries")
+
+
+def _guess_mime(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    return {".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg", ".gif": "image/gif"}.get(ext, "application/octet-stream")
 
 
 # ---------------------------------------------------------------------------
