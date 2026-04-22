@@ -8,11 +8,14 @@ UTXOs, protocol parameters, or raw tx submission.
 API docs: https://docs.blockfrost.io
 """
 
+import logging
 import os
 import time
 from typing import Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 BLOCKFROST_BASE_URL = os.environ.get(
     "BLOCKFROST_BASE_URL", "https://cardano-mainnet.blockfrost.io/api/v0"
@@ -33,7 +36,7 @@ class BlockfrostClient:
         self.session = requests.Session()
         self.session.headers.update({"project_id": self.project_id})
 
-    def _request(self, method: str, path: str, **kwargs) -> dict | list:
+    def _request(self, method: str, path: str, **kwargs):
         url = f"{self.base_url}{path}"
         kwargs.setdefault("timeout", 30)
 
@@ -58,7 +61,7 @@ class BlockfrostClient:
         resp.raise_for_status()
         return resp.json()
 
-    def _get(self, path: str, params: Optional[dict] = None) -> dict | list:
+    def _get(self, path: str, params: Optional[dict] = None):
         return self._request("GET", path, params=params)
 
     # ------------------------------------------------------------------
@@ -116,6 +119,8 @@ class BlockfrostClient:
                     time.sleep(wait)
                     continue
 
+                if resp.status_code >= 400:
+                    logger.error("Tx submit %d response: %s", resp.status_code, resp.text[:500])
                 resp.raise_for_status()
                 return resp.json()
 
@@ -125,6 +130,8 @@ class BlockfrostClient:
                     continue
                 raise
 
+        if resp.status_code >= 400:
+            logger.error("Tx submit %d response (final): %s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
         return resp.json()
 
