@@ -5,3 +5,17 @@ __pycache__/
 *.skey
 *.vkey
 node_modules/
+dist/
+seed.hex
+
+# macOS / editor / AI tooling
+.DS_Store
+.claude/
+.cursor/
+
+# Environment-specific configs (may contain endpoints or secrets)
+midnight-agent/.env.mainnet*
+midnight-agent/.env.preprod*
+
+# Runtime logs
+*.log
