@@ -131,17 +131,21 @@ bonding-curve tokens directly (no copy-trading).
 so keys never leave the machine. Also used as the execution layer of
 `copy_trader` and `snekfun_launch`.
 
-| API area      | Endpoint                                     | Function                                        |
-|---------------|----------------------------------------------|-------------------------------------------------|
-| Trade         | `POST {builder}/trade`                       | `buy_via_builder`, `sell_via_builder`           |
-| Trade (CPMM)  | `POST {builder}/cpmm-trade`                  | `buy_cpmm_via_builder`, `sell_cpmm_via_builder` |
-| Cancel order  | `POST {builder}/cancel`                      | `cancel_via_builder`                            |
-| Sign & submit | `POST {builder}/sign-and-submit`, `/submit`  | `sign_and_submit_via_builder`, `submit_via_builder` |
-| Launch        | `POST {builder}/launch`                      | `launch_token` (see `snekfun_launch.py`)        |
-| Transfer      | `POST {builder}/transfer`                    | `transfer_via_builder`                          |
-| Balance       | `POST {balance}/balance`                     | `get_balance`                                   |
-| Vesting       | `POST {vesting}/create-lock`, `/withdraw`    | `create_vesting_lock`, `withdraw_vesting`       |
-| Pool data     | `GET {analytics}/v1/pools-feed/...`          | `get_pool_state`, `get_token_state`, `get_curve_progress`, `get_parameters` |
+| API area         | Endpoint                                                | Function                                                               |
+|------------------|---------------------------------------------------------|------------------------------------------------------------------------|
+| Trade            | `POST {builder}/order`                                  | `buy_via_builder`, `sell_via_builder`, `buy_with_output_via_builder`   |
+| Trade (CPMM)     | `POST {builder}/order` (auto-routed)                    | `buy_cpmm_via_builder`, `sell_cpmm_via_builder`                        |
+| Cancel order     | `POST {builder}/cancel`                                 | `cancel_via_builder`                                                   |
+| Sign & submit    | `POST {builder}/sign-and-submit`, `/sign`, `/submit`    | `sign_and_submit_via_builder`, `sign_via_builder`, `submit_via_builder`|
+| Launch           | `POST {builder}/launch`                                 | `launch_token` (see `snekfun_launch.py`)                               |
+| Transfer         | `POST {builder}/transfer`                               | `transfer_via_builder`                                                 |
+| Parameters       | `GET {builder}/parameters`                              | `get_parameters`                                                       |
+| Pool data        | `GET {analytics}/v1/pools-feed/...`                     | `get_pool_state`, `get_token_state`, `get_curve_progress`              |
+| Balances         | `GET {balances}/v1/pool/holders`, `POST /v1/user/pnl-card`, `POST /v1/asset/asset-balance` | `get_pool_holders`, `get_pnl_card`, `get_asset_balance`   |
+| Vesting (build)  | `POST {vesting}/create-lock`, `/withdraw`               | `create_vesting_lock`, `withdraw_vesting`                              |
+| Vesting (query)  | `POST {vesting}/v1/vesting/get-by-redeemer`, `/get-by-asset/{asset}` | `get_vestings_by_redeemer`, `get_vestings_by_asset`         |
+| UTXO Monitor     | `POST {utxo-monitor}/getUtxos`                          | `get_utxos_by_pkh`                                                     |
+| Charts           | `GET {charts}/v1/charts/{history,initial-state,mcap/history,mcap/initial-state}` | `get_chart_history`, `get_chart_initial_state`, `get_mcap_history`, `get_mcap_initial_state` |
 
 **Docs** — official Snek.fun API reference:
 
@@ -149,8 +153,8 @@ so keys never leave the machine. Also used as the execution layer of
 - API overview:    https://docs.snek.fun/api-reference/overview
 
 **Host overrides** (for staging/testing):
-`SNEKFUN_BUILDER_URL`, `SNEKFUN_ANALYTICS_URL`, `SNEKFUN_BALANCE_URL`,
-`SNEKFUN_VESTING_URL`.
+`SNEKFUN_BUILDER_URL`, `SNEKFUN_ANALYTICS_URL`, `SNEKFUN_BALANCES_URL`,
+`SNEKFUN_VESTING_URL`, `SNEKFUN_CHARTS_URL`, `SNEKFUN_UTXO_MONITOR_URL`.
 
 **CLI.**
 

@@ -70,8 +70,10 @@ DEPOSIT_ADA = 1_500_000
 
 BUILDER_URL = os.environ.get("SNEKFUN_BUILDER_URL", "https://builder.snek.fun")
 ANALYTICS_URL = os.environ.get("SNEKFUN_ANALYTICS_URL", "https://analytics.snek.fun")
-BALANCE_URL = os.environ.get("SNEKFUN_BALANCE_URL", "https://balance.snek.fun")
+BALANCES_URL = os.environ.get("SNEKFUN_BALANCES_URL", f"{ANALYTICS_URL}/balances")
 VESTING_URL = os.environ.get("SNEKFUN_VESTING_URL", "https://token-vesting.snek.fun")
+CHARTS_URL = os.environ.get("SNEKFUN_CHARTS_URL", "https://charts.snek.fun")
+UTXO_MONITOR_URL = os.environ.get("SNEKFUN_UTXO_MONITOR_URL", "https://utxo-monitor.snek.fun")
 
 SLIPPAGE_OPTIONS = ["15", "30", "50", "75", "infinity"]
 SIDE_OPTIONS = ["BUY", "BUY_WITH_OUTPUT", "SELL"]
@@ -84,11 +86,12 @@ RETRY_BACKOFF = 2.0
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _post(url: str, payload: dict, timeout: int = 30) -> dict:
+def _post(url: str, payload, timeout: int = 30, params: Optional[dict] = None) -> dict:
     for attempt in range(MAX_RETRIES):
         try:
             resp = requests.post(
                 url, json=payload,
+                params=params,
                 headers={"Content-Type": "application/json"},
                 timeout=timeout,
             )
@@ -106,8 +109,8 @@ def _post(url: str, payload: dict, timeout: int = 30) -> dict:
     return resp.json()
 
 
-def _get(url: str, timeout: int = 15) -> dict:
-    resp = requests.get(url, timeout=timeout)
+def _get(url: str, timeout: int = 15, params: Optional[dict] = None):
+    resp = requests.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -836,19 +839,60 @@ def transfer_via_builder(
 
 
 # ---------------------------------------------------------------------------
-# Balance API
-# Docs: https://docs.snek.fun/api-reference/overview  (POST /balance)
+# Balances API  (base: https://analytics.snek.fun/balances)
+# Docs: https://docs.snek.fun/api-reference/balances-api/overview
 # ---------------------------------------------------------------------------
 
-def get_balance(address: str) -> list[dict]:
-    """Query the snek.fun balance service for an address.
+def get_pool_holders(
+    asset_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Paged list of holders for an asset, plus dev balance and total count.
 
-    POST {balance}/balance -> {"balance": [{"policyId", "base16Name", "amount"}, ...]}
-
-    Returns the inner balance list (empty list if not found).
+    GET {balances}/v1/pool/holders?assetId=...&limit=&offset=
+    Response: {"holders": [{"address", "quantity"}, ...], "dev": {...}, "count": int}
     """
-    data = _post(f"{BALANCE_URL}/balance", {"address": address}, timeout=15)
-    return data.get("balance", []) or []
+    return _get(
+        f"{BALANCES_URL}/v1/pool/holders",
+        params={"assetId": asset_id, "limit": limit, "offset": offset},
+    )
+
+
+def get_pnl_card(asset_id: str, payment_key_hashes: list[str]) -> Optional[dict]:
+    """Profit/loss summary for one asset across one or more wallet PKHs.
+
+    POST {balances}/v1/user/pnl-card?assetId=...  body: ["<pkh_hex>", ...]
+    Returns the response object or None when no data is available.
+    """
+    if not payment_key_hashes:
+        raise ValueError("payment_key_hashes must contain at least one 56-char hex PKH")
+    return _post(
+        f"{BALANCES_URL}/v1/user/pnl-card",
+        payment_key_hashes,
+        params={"assetId": asset_id},
+        timeout=15,
+    )
+
+
+def get_asset_balance(asset_id: str, payment_key_hashes: list[str]) -> Optional[float]:
+    """Aggregate ADA-denominated balance for one asset across one or more wallet PKHs.
+
+    POST {balances}/v1/asset/asset-balance?assetId=...  body: ["<pkh_hex>", ...]
+    Returns the `balance` number, or None when no balance data exists.
+    """
+    if not payment_key_hashes:
+        raise ValueError("payment_key_hashes must contain at least one 56-char hex PKH")
+    data = _post(
+        f"{BALANCES_URL}/v1/asset/asset-balance",
+        payment_key_hashes,
+        params={"assetId": asset_id},
+        timeout=15,
+    )
+    if data is None:
+        return None
+    return data.get("balance")
 
 
 # ---------------------------------------------------------------------------
@@ -862,25 +906,27 @@ def create_vesting_lock(
     address: str,
     asset_id: str,
     amount: int,
-    lock_end_unix: int,
+    lock_end_ms: int,
     stages_count: int,
 ) -> dict:
     """Create a token-vesting lock on snek.fun.
 
-    POST {vesting}/create-lock
+    POST {vesting}/create-lock -> {"cbor": "<unsigned tx hex>"}
 
     Args:
-        address:       bech32 owner address.
-        asset_id:      token id as "policyId.assetName".
-        amount:        base-unit token amount to lock.
-        lock_end_unix: unix timestamp when the lock fully releases.
-        stages_count:  number of vesting stages between now and lock_end.
+        address:     bech32 owner address.
+        asset_id:    token id as "policyId.assetName".
+        amount:      base-unit token amount to lock (sent as bigint string).
+        lock_end_ms: unix timestamp in MILLISECONDS when the lock fully releases.
+        stages_count: number of vesting stages (1-10); tokens unlock in equal parts.
     """
+    if not 1 <= stages_count <= 10:
+        raise ValueError("stages_count must be between 1 and 10")
     payload = {
         "address": address,
         "assetId": asset_id,
         "amount": str(amount),
-        "lockEnd": int(lock_end_unix),
+        "lockEnd": int(lock_end_ms),
         "stagesCount": int(stages_count),
     }
     return _post(f"{VESTING_URL}/create-lock", payload, timeout=30)
@@ -895,6 +941,132 @@ def withdraw_vesting(*, lock_id: str, address: str) -> dict:
         f"{VESTING_URL}/withdraw",
         {"id": lock_id, "address": address},
         timeout=30,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Vesting Query API  (base: https://token-vesting.snek.fun)
+# Docs: https://docs.snek.fun/api-reference/snekfun-api/overview
+# ---------------------------------------------------------------------------
+
+def get_vestings_by_redeemer(redeemer_vkh: str) -> list[dict]:
+    """List vesting locks redeemable by a single redeemer PKH.
+
+    POST {vesting}/v1/vesting/get-by-redeemer?redeemerVkhs=<hex>
+    """
+    data = _post(
+        f"{VESTING_URL}/v1/vesting/get-by-redeemer",
+        {},
+        params={"redeemerVkhs": redeemer_vkh},
+        timeout=15,
+    )
+    return data.get("vestings", []) or []
+
+
+def get_vestings_by_asset(asset_id: str) -> list[dict]:
+    """List vesting locks for a given native asset.
+
+    POST {vesting}/v1/vesting/get-by-asset/<policyId.hexAssetName>
+    """
+    data = _post(
+        f"{VESTING_URL}/v1/vesting/get-by-asset/{asset_id}",
+        {},
+        timeout=15,
+    )
+    return data.get("vestings", []) or []
+
+
+# ---------------------------------------------------------------------------
+# UTXO Monitor API  (base: https://utxo-monitor.snek.fun)
+# Docs: https://docs.snek.fun/api-reference/utxo-monitor/overview
+# ---------------------------------------------------------------------------
+
+def get_utxos_by_pkh(
+    pkh: str,
+    *,
+    offset: int = 0,
+    limit: int = 100,
+    query: str = "unspent",
+) -> list[dict]:
+    """Fetch unspent outputs for a wallet payment-key hash.
+
+    POST {utxo-monitor}/getUtxos  body: {"pkh", "offset", "limit", "query"}
+    Returns a list of {txHash, index, address, value: [{unit, amount}]}.
+
+    Paginate by requesting `limit` at a time; a short page signals end-of-data.
+    """
+    return _post(
+        f"{UTXO_MONITOR_URL}/getUtxos",
+        {"pkh": pkh, "offset": offset, "limit": limit, "query": query},
+        timeout=15,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Charts API  (base: https://charts.snek.fun)
+# Docs: https://docs.snek.fun/api-reference/charts-ws/http
+# ---------------------------------------------------------------------------
+
+CHART_RESOLUTIONS = ("min1", "min5", "hour1", "day1", "week1", "month1")
+
+
+def _charts_params(base: str, quote: str, start: int, end: int, resolution: str) -> dict:
+    if resolution not in CHART_RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {CHART_RESOLUTIONS}")
+    return {"base": base, "quote": quote, "from": start, "to": end, "resolution": resolution}
+
+
+def get_chart_history(
+    *, base: str, quote: str, start: int, end: int, resolution: str
+) -> list[dict]:
+    """OHLCV bars for a pair over a time range.
+
+    GET {charts}/v1/charts/history
+    Returns list of {pair, time, low, high, open, close, volume}.
+    """
+    return _get(
+        f"{CHARTS_URL}/v1/charts/history",
+        params=_charts_params(base, quote, start, end, resolution),
+    )
+
+
+def get_chart_initial_state(*, base: str, quote: str, resolution: str) -> dict:
+    """Latest OHLCV bar snapshot for a pair at a resolution.
+
+    GET {charts}/v1/charts/initial-state?base=&quote=&resolution=
+    Returns {"bar": {...}, "isRelevant": bool}.
+    """
+    if resolution not in CHART_RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {CHART_RESOLUTIONS}")
+    return _get(
+        f"{CHARTS_URL}/v1/charts/initial-state",
+        params={"base": base, "quote": quote, "resolution": resolution},
+    )
+
+
+def get_mcap_history(
+    *, base: str, quote: str, start: int, end: int, resolution: str
+) -> list[dict]:
+    """Market-cap bars for a pair over a time range.
+
+    GET {charts}/v1/charts/mcap/history
+    """
+    return _get(
+        f"{CHARTS_URL}/v1/charts/mcap/history",
+        params=_charts_params(base, quote, start, end, resolution),
+    )
+
+
+def get_mcap_initial_state(*, base: str, quote: str, resolution: str) -> dict:
+    """Latest market-cap bar snapshot for a pair at a resolution.
+
+    GET {charts}/v1/charts/mcap/initial-state?base=&quote=&resolution=
+    """
+    if resolution not in CHART_RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {CHART_RESOLUTIONS}")
+    return _get(
+        f"{CHARTS_URL}/v1/charts/mcap/initial-state",
+        params={"base": base, "quote": quote, "resolution": resolution},
     )
 
 
