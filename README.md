@@ -1,8 +1,20 @@
 # Agent Lump
 
-Cardano trading automation: DEX swaps, arbitrage scanning, copy trading, and
-bonding-curve launches. Each tool below is written as a self-contained skill
-an agent can pick up, aim, and run.
+Cardano mainnet trading automation: DEX swaps, arbitrage scanning, copy
+trading, and bonding-curve launches. Each tool below is written as a
+self-contained skill an agent can pick up, aim, and run.
+
+**Skills**
+
+| Skill                                     | What it does                                                  |
+|-------------------------------------------|---------------------------------------------------------------|
+| [`copy_trader`](#skill-copy_trader)       | Mirror another wallet's Snek.fun buys / sells                 |
+| [`swap_ada_to_token`](#skill-swap_ada_to_token) | One-shot ADA→token swap via DexHunter aggregation       |
+| [`arb_scanner` / `arb_executor`](#skill-arb_scanner--arb_executor) | Cross-DEX arbitrage discovery & execution     |
+| [`snekfun_client`](#skill-snekfun_client) | Snek.fun builder API: buy / sell / cancel / launch / vesting  |
+| [`snekfun_launch`](#skill-snekfun_launch) | Launch a new bonding-curve token on Snek.fun                  |
+| [`blockfrost_client`](#skill-blockfrost_client) | Shared Cardano chain access (imported by every module)  |
+| [`midnight-agent`](#skill-midnight-agent) | Midnight Network deploys & Compact smart contracts            |
 
 ---
 
@@ -120,6 +132,13 @@ opportunity through to an executed cycle using DexHunter routing.
 Configure via `ARB_*` env vars (trade amount, min profit, scan interval,
 impact caps, dry-run). Defaults are dry-run.
 
+**Run.**
+
+```bash
+python3 arb_scanner.py                  # passive scan, prints opportunities
+python3 arb_executor.py                 # dry-run by default; set ARB_DRY_RUN=0 to fire
+```
+
 ---
 
 ## skill: snekfun_client
@@ -230,9 +249,8 @@ every other module; not a CLI.
 
 ## skill: midnight-agent
 
-**Use when** you want to deploy tokens to the Midnight Network, interact with
-the NYX deploy UI, or experiment with Compact smart contracts via the 1AM
-wallet.
+**Use when** you want to deploy fungible tokens to the Midnight Network or
+experiment with Compact smart contracts via the 1AM wallet.
 
 See `midnight-agent/README.md` for setup and commands.
 
