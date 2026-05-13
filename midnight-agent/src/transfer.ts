@@ -195,32 +195,130 @@ export async function transferCombined(
 
 // ─── DUST Management ────────────────────────────────────────────────────
 
+export interface DustStatus {
+  nightBalance: bigint;
+  dustBalance: bigint;
+  dustCoinCount: number;
+  registeredCoinCount: number;
+  unregisteredCoinCount: number;
+  hasNight: boolean;
+  hasDust: boolean;
+  isRegistered: boolean;
+}
+
+const SPECK_PER_DUST = 1_000_000_000_000_000n;
+const STAR_PER_NIGHT = 1_000_000n;
+
+export function formatNight(raw: bigint): string {
+  const whole = raw / STAR_PER_NIGHT;
+  const frac = (raw % STAR_PER_NIGHT).toString().padStart(6, '0');
+  return `${whole.toLocaleString()}.${frac}`;
+}
+
+export function formatDust(raw: bigint): string {
+  const whole = raw / SPECK_PER_DUST;
+  const frac = (raw % SPECK_PER_DUST).toString().padStart(15, '0').slice(0, 6);
+  return `${whole.toLocaleString()}.${frac}`;
+}
+
+export async function getDustStatus(
+  wallet: InitializedWallet,
+): Promise<DustStatus> {
+  const state = await wallet.facade.waitForSyncedState();
+  const nightBalance = state.unshielded.balances[ledger.nativeToken().raw] ?? 0n;
+  const dustBalance = state.dust.balance(new Date());
+  const dustCoinCount = state.dust.totalCoins.length;
+
+  const allCoins = state.unshielded.availableCoins;
+  const unregistered = allCoins.filter(
+    (coin: any) => coin.meta?.registeredForDustGeneration !== true,
+  );
+
+  return {
+    nightBalance,
+    dustBalance,
+    dustCoinCount,
+    registeredCoinCount: allCoins.length - unregistered.length,
+    unregisteredCoinCount: unregistered.length,
+    hasNight: nightBalance > 0n,
+    hasDust: dustBalance > 0n,
+    isRegistered: unregistered.length === 0 && allCoins.length > 0,
+  };
+}
+
 export async function registerNightForDust(
   wallet: InitializedWallet,
-): Promise<TransferResult> {
+  options?: { waitForDust?: boolean; pollIntervalMs?: number; timeoutMs?: number },
+): Promise<TransferResult & { dustStatus?: DustStatus }> {
   try {
     const state = await wallet.facade.waitForSyncedState();
-    const availableCoins = state.unshielded.availableCoins;
 
-    if (!availableCoins.length) {
-      return { success: false, error: 'No unshielded NIGHT coins available to register' };
+    // Check if DUST is already available
+    const dustBalance = state.dust.balance(new Date());
+    if (state.dust.totalCoins.length > 0 && dustBalance > 0n) {
+      const status = await getDustStatus(wallet);
+      return {
+        success: true,
+        txHash: '(already registered)',
+        dustStatus: status,
+      };
     }
 
-    const recipe = await wallet.facade.registerNightUtxosForDustGeneration(
-      availableCoins,
-      wallet.keystore.getPublicKey(),
-      (payload) => wallet.keystore.signData(payload),
+    // Find unregistered NIGHT UTXOs
+    const unregistered = state.unshielded.availableCoins.filter(
+      (coin: any) => coin.meta?.registeredForDustGeneration !== true,
     );
 
-    const finalized = await wallet.facade.finalizeRecipe(recipe);
-    const txId = await wallet.facade.submitTransaction(finalized);
+    if (!unregistered.length && !state.unshielded.availableCoins.length) {
+      return { success: false, error: 'No unshielded NIGHT coins available. Fund your wallet first.' };
+    }
 
-    return { success: true, txHash: txId };
+    if (!unregistered.length) {
+      // All coins registered but no DUST yet — just need to wait
+      console.log('  All NIGHT already registered. Waiting for DUST to accrue...');
+    } else {
+      // Register unregistered coins
+      const recipe = await wallet.facade.registerNightUtxosForDustGeneration(
+        unregistered,
+        wallet.keystore.getPublicKey(),
+        (payload) => wallet.keystore.signData(payload),
+      );
+
+      const finalized = await wallet.facade.finalizeRecipe(recipe);
+      const txId = await wallet.facade.submitTransaction(finalized);
+      console.log(`  Registration tx submitted: ${txId}`);
+    }
+
+    // Optionally wait for DUST to start accruing
+    if (options?.waitForDust !== false) {
+      const pollInterval = options?.pollIntervalMs ?? 5_000;
+      const timeout = options?.timeoutMs ?? 180_000;
+      const deadline = Date.now() + timeout;
+
+      console.log('  Waiting for DUST to accrue (may take 1-2 minutes)...');
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, pollInterval));
+        const current = await wallet.facade.waitForSyncedState();
+        const bal = current.dust.balance(new Date());
+        if (bal > 0n) {
+          const status = await getDustStatus(wallet);
+          console.log(`  DUST available: ${formatDust(bal)}`);
+          return { success: true, dustStatus: status };
+        }
+      }
+      return { success: true, error: 'Registration submitted but DUST has not accrued yet. Check again later.' };
+    }
+
+    const status = await getDustStatus(wallet);
+    return { success: true, dustStatus: status };
   } catch (e) {
-    return {
-      success: false,
-      error: e instanceof Error ? e.message : String(e),
-    };
+    const msg = e instanceof Error ? e.message : String(e);
+    // Error 138 means already registered
+    if (msg.includes('138') || msg.includes('already registered')) {
+      const status = await getDustStatus(wallet);
+      return { success: true, txHash: '(already registered)', dustStatus: status };
+    }
+    return { success: false, error: msg };
   }
 }
 

@@ -44,8 +44,11 @@ import {
   transferUnshielded,
   transferShielded,
   registerNightForDust,
+  getDustStatus,
+  formatNight,
+  formatDust,
 } from './transfer.js';
-import { getTokenGuide, deployToken, connectToken } from './token.js';
+import { getTokenGuide, deployToken, connectToken, preflightCheck } from './token.js';
 import {
   getPoolState,
   estimateSwap,
@@ -54,6 +57,28 @@ import {
   poolFeePct,
   poolExplorerLink,
 } from './dex.js';
+import {
+  getAscendConfig,
+  getMarkets,
+  getMarket,
+  getEvents,
+  getOrderbook,
+  getTicker,
+  getLeaderboard,
+  getAccounts,
+  getPositions,
+  getMarketSummary,
+  createOrder,
+  waitForOrder,
+  closePosition,
+  waitForClose,
+  cancelOrder,
+  type OrderSide,
+  type OrderType,
+  type ChainType,
+  type EventRange,
+  type LeaderboardRange,
+} from './ascend.js';
 
 const [domain, command, ...rest] = process.argv.slice(2);
 
@@ -96,14 +121,32 @@ function usage(): void {
               shielded --to <addr> --amount <n>      Send shielded tokens
               register-dust                          Register NIGHT for DUST generation
 
+    dust      status                        Show DUST balance and registration state
+              register [--no-wait]           Register NIGHT UTXOs for DUST generation
+
     token     guide                         Show token creation guide
-              deploy --name <n> --ticker <t> --supply <n> [--contract <dir>]
+              preflight [--contract <dir>]   Check deploy readiness (contract, prover, DUST)
+              deploy --name <n> --ticker <t> --supply <n> [--contract <dir>] [--local-prove] [--no-sponsor]
               connect <address>              Connect to deployed token
 
     dex       status                        DEX ecosystem info
               pool <address> [--rpc]        Pool state
               estimate --pool <addr> --amount <n> [--direction a_to_b|b_to_a]
               discover                      Discover pools (placeholder)
+
+    ascend    markets                       List all active markets
+              market <slug>                 Market detail + orderbook summary
+              events <slug> [--range 1D|1W|1M|ALL]  Price history
+              orderbook <slug>              Live orderbook
+              ticker <id>                   Spot price for a ticker
+              leaderboard [--limit N] [--range today|weekly|monthly|all]
+              accounts                      Linked addresses and balances (auth)
+              positions <address>           Open positions (auth)
+              order --market <slug> --side YES|NO --margin <n> --leverage <n>
+                    [--type MARKET|LIMIT] [--trigger-price <n>]
+                    [--address <addr>] [--chain MIDNIGHT]
+              close --order-id <n> --address <addr> [--chain MIDNIGHT]
+              cancel --order-id <n> --address <addr> [--chain MIDNIGHT]
   `);
 }
 
@@ -353,11 +396,97 @@ async function main(): Promise<void> {
     }
   }
 
+  // ─── DUST Commands ─────────────────────────────────────────────────
+
+  else if (domain === 'dust') {
+    if (command === 'status') {
+      console.log('\n  Initializing wallet and syncing with chain...');
+      const wallet = await initWallet();
+      try {
+        const status = await getDustStatus(wallet);
+        console.log(`\n  DUST Status`);
+        console.log(`  ─────────────────────────────`);
+        console.log(`  NIGHT balance:      ${formatNight(status.nightBalance)} tNight`);
+        console.log(`  DUST balance:       ${formatDust(status.dustBalance)} DUST`);
+        console.log(`  DUST coins:         ${status.dustCoinCount}`);
+        console.log(`  Registered UTXOs:   ${status.registeredCoinCount}`);
+        console.log(`  Unregistered UTXOs: ${status.unregisteredCoinCount}`);
+        console.log(`  Status:             ${status.isRegistered ? 'Registered' : status.hasNight ? 'NIGHT available — run "dust register"' : 'No NIGHT — fund wallet first'}`);
+        if (status.hasDust) {
+          console.log(`\n  Ready to deploy contracts and call circuits.`);
+        } else if (status.isRegistered) {
+          console.log(`\n  Registered but DUST still accruing. Rate: 5 DUST per NIGHT, ~1 week to cap.`);
+        }
+      } finally {
+        await stopWallet(wallet);
+      }
+    } else if (command === 'register') {
+      console.log('\n  Initializing wallet and syncing with chain...');
+      const wallet = await initWallet();
+      try {
+        const noWait = flag('no-wait');
+        const result = await registerNightForDust(wallet, { waitForDust: !noWait });
+        if (result.success) {
+          if (result.txHash === '(already registered)') {
+            console.log(`\n  NIGHT already registered for DUST generation.`);
+          } else if (result.txHash) {
+            console.log(`\n  NIGHT registered for DUST generation: ${result.txHash}`);
+          }
+          if (result.dustStatus) {
+            console.log(`  NIGHT balance: ${formatNight(result.dustStatus.nightBalance)}`);
+            console.log(`  DUST balance:  ${formatDust(result.dustStatus.dustBalance)}`);
+            if (result.dustStatus.hasDust) {
+              console.log(`\n  Ready to deploy contracts.`);
+            }
+          }
+          if (result.error) {
+            console.log(`\n  Note: ${result.error}`);
+          }
+        } else {
+          console.error(`\n  Registration failed: ${result.error}`);
+        }
+      } finally {
+        await stopWallet(wallet);
+      }
+    } else {
+      console.error(`Unknown dust command: ${command}`);
+      usage();
+      process.exit(1);
+    }
+  }
+
   // ─── Token Commands ─────────────────────────────────────────────────
 
   else if (domain === 'token') {
     if (command === 'guide') {
       console.log(getTokenGuide());
+    } else if (command === 'preflight') {
+      const useSponsorship = flag('sponsored') || !flag('no-sponsor');
+      let wallet = null;
+      if (!useSponsorship) {
+        console.log('\n  Initializing wallet for balance checks...');
+        wallet = await initWallet();
+      }
+      try {
+        const result = await preflightCheck(wallet, arg('contract') ?? '', { useGasSponsorship: useSponsorship });
+        console.log(`\n  Deploy Readiness Check`);
+        console.log(`  ──────────────────────────────`);
+        console.log(`  Contract compiled:  ${result.contractCompiled ? 'YES' : 'NO'}`);
+        console.log(`  Proof server:       ${result.proverReachable ? 'YES' : 'NO'}`);
+        console.log(`  DUST available:     ${result.walletHasDust ? 'YES' : 'NO'}${result.dustBalance ? ` (${result.dustBalance})` : useSponsorship ? ' (gas sponsored)' : ''}`);
+        if (result.nightBalance) {
+          console.log(`  NIGHT balance:      ${result.nightBalance}`);
+        }
+        console.log(`\n  Status: ${result.ready ? 'READY TO DEPLOY' : 'NOT READY'}`);
+        for (const err of result.errors) {
+          console.log(`  ERROR: ${err}`);
+        }
+        for (const warn of result.warnings) {
+          console.log(`  WARNING: ${warn}`);
+        }
+      } finally {
+        if (wallet) await stopWallet(wallet);
+      }
     } else if (command === 'deploy') {
       const name = arg('name');
       const ticker = arg('ticker');
@@ -368,38 +497,50 @@ async function main(): Promise<void> {
         );
         process.exit(1);
       }
-      const sponsored = flag('sponsored') || !flag('no-sponsor');
-      if (sponsored) {
-        console.log('\n  Initializing wallet (keys only — gas sponsored by remote prover)...');
+      const useSponsorship = flag('sponsored') || !flag('no-sponsor');
+      const useLocalProve = flag('local-prove');
+      const deployParams = {
+        contractDir: arg('contract') ?? '',
+        metadata: {
+          name,
+          ticker,
+          description: arg('description') ?? '',
+          decimals: Number(arg('decimals') ?? 6),
+          initialSupply: BigInt(supply),
+        },
+        useGasSponsorship: useSponsorship,
+        localProve: useLocalProve,
+        localProverUrl: arg('local-prover-url'),
+        remoteSubmitUrl: arg('remote-submit-url'),
+      };
+
+      console.log('\n  Running pre-deploy checks...');
+      const preflight = await preflightCheck(null, deployParams.contractDir, { useGasSponsorship: useSponsorship });
+      if (!preflight.ready) {
+        console.error('\n  Deploy readiness check FAILED:');
+        for (const err of preflight.errors) {
+          console.error(`    - ${err}`);
+        }
+        process.exit(1);
+      }
+      console.log('  Pre-deploy checks passed.');
+      for (const warn of preflight.warnings) {
+        console.log(`  WARNING: ${warn}`);
+      }
+
+      if (useLocalProve) {
+        console.log(`\n  Initializing wallet (keys only — local prove + remote submit)...`);
         const wallet = initWalletKeysOnly();
-        const result = await deployToken(wallet, {
-          contractDir: arg('contract') ?? '',
-          metadata: {
-            name,
-            ticker,
-            description: arg('description') ?? '',
-            decimals: Number(arg('decimals') ?? 6),
-            initialSupply: BigInt(supply),
-          },
-        });
+        const result = await deployToken(wallet, deployParams);
         console.log(`\n  Token Deployed!`);
         console.log(`  Contract: ${result.contractAddress}`);
         console.log(`  Explorer: ${result.explorerUrl}`);
         console.log(`  Tx: ${result.txHash}`);
       } else {
-        console.log('\n  Initializing wallet...');
+        console.log('\n  Initializing wallet (full sync — this may take several minutes on first run)...');
         const wallet = await initWallet();
         try {
-          const result = await deployToken(wallet, {
-            contractDir: arg('contract') ?? '',
-            metadata: {
-              name,
-              ticker,
-              description: arg('description') ?? '',
-              decimals: Number(arg('decimals') ?? 6),
-              initialSupply: BigInt(supply),
-            },
-          });
+          const result = await deployToken(wallet, deployParams);
           console.log(`\n  Token Deployed!`);
           console.log(`  Contract: ${result.contractAddress}`);
           console.log(`  Explorer: ${result.explorerUrl}`);
@@ -510,7 +651,222 @@ const token = await connectToken(wallet, address, arg('contract'));
       usage();
       process.exit(1);
     }
-  } else {
+  }
+
+  // ─── Ascend Commands ──────────────────────────────────────────────
+
+  else if (domain === 'ascend') {
+    if (command === 'markets') {
+      const markets = await getMarkets();
+      console.log(`\n  Ascend — ${markets.length} active markets:\n`);
+      for (const m of markets) {
+        const price = m.mark_price !== null ? `${(m.mark_price * 100).toFixed(1)}%` : '—';
+        const status = m.closed ? '[CLOSED]' : '';
+        console.log(`  ${m.slug.padEnd(32)} ${price.padStart(7)}  ${m.category ?? ''}  ${status}`);
+      }
+    } else if (command === 'market') {
+      const slug = rest[0];
+      if (!slug) {
+        console.error('Usage: midnight-agent ascend market <slug>');
+        process.exit(1);
+      }
+      const summary = await getMarketSummary(slug);
+      console.log(`\n  ${summary.title}`);
+      console.log(`  ─────────────────────────────`);
+      console.log(`  Slug:       ${summary.slug}`);
+      console.log(`  Mark price: ${summary.mark_price !== null ? (summary.mark_price * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Category:   ${summary.category ?? '—'}`);
+      console.log(`  Closed:     ${summary.closed}`);
+      console.log(`  Best bid:   ${summary.bestBid !== null ? (summary.bestBid * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Best ask:   ${summary.bestAsk !== null ? (summary.bestAsk * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Bid depth:  $${summary.bidDepth.toFixed(2)}`);
+      console.log(`  Ask depth:  $${summary.askDepth.toFixed(2)}`);
+    } else if (command === 'events') {
+      const slug = rest[0];
+      if (!slug) {
+        console.error('Usage: midnight-agent ascend events <slug> [--range 1D|1W|1M|ALL]');
+        process.exit(1);
+      }
+      const range = (arg('range') ?? '1M') as EventRange;
+      const events = await getEvents(slug, range);
+      console.log(`\n  Ascend — ${slug} price history (${range}, ${events.length} points):\n`);
+      for (const e of events.data.slice(-20)) {
+        const bar = '█'.repeat(Math.round(e.yes_percent / 2));
+        console.log(`  ${e.timestamp.slice(0, 16)}  YES ${String(e.yes_percent).padStart(3)}%  ${bar}`);
+      }
+    } else if (command === 'orderbook') {
+      const slug = rest[0];
+      if (!slug) {
+        console.error('Usage: midnight-agent ascend orderbook <slug>');
+        process.exit(1);
+      }
+      const book = await getOrderbook(slug);
+      console.log(`\n  Ascend Orderbook — ${slug}\n`);
+      console.log(`  BIDS (YES)                     ASKS (NO)`);
+      console.log(`  ${'─'.repeat(28)}   ${'─'.repeat(28)}`);
+      const maxRows = Math.max(book.bids.length, book.asks.length, 1);
+      for (let i = 0; i < Math.min(maxRows, 15); i++) {
+        const bid = book.bids[i];
+        const ask = book.asks[i];
+        const bidStr = bid ? `${(bid.price * 100).toFixed(1).padStart(6)}%  $${bid.size.toFixed(2).padStart(8)}` : ''.padEnd(18);
+        const askStr = ask ? `${(ask.price * 100).toFixed(1).padStart(6)}%  $${ask.size.toFixed(2).padStart(8)}` : '';
+        console.log(`  ${bidStr}           ${askStr}`);
+      }
+    } else if (command === 'ticker') {
+      const id = rest[0];
+      if (!id) {
+        console.error('Usage: midnight-agent ascend ticker <id>');
+        process.exit(1);
+      }
+      const ticker = await getTicker(id);
+      console.log(`\n  Ticker: ${ticker.id}`);
+      console.log(`  Price:  $${ticker.price}`);
+      console.log(`  Source: ${ticker.source}`);
+    } else if (command === 'leaderboard') {
+      const limit = Number(arg('limit') ?? 20);
+      const range = (arg('range') ?? 'all') as LeaderboardRange;
+      const entries = await getLeaderboard(limit, range);
+      console.log(`\n  Ascend Leaderboard (${range}, top ${entries.length}):\n`);
+      console.log(`  ${'#'.padStart(4)}  ${'Address'.padEnd(16)}  ${'PnL'.padStart(10)}  ${'Win%'.padStart(6)}  Trades`);
+      console.log(`  ${'─'.repeat(60)}`);
+      entries.forEach((e, i) => {
+        const addr = (e.username ?? e.address).slice(0, 14).padEnd(16);
+        const pnl = `$${e.total_pnl.toFixed(2)}`.padStart(10);
+        const wr = `${(e.win_rate * 100).toFixed(0)}%`.padStart(6);
+        console.log(`  ${String(i + 1).padStart(4)}  ${addr}  ${pnl}  ${wr}  ${e.trade_count}`);
+      });
+    } else if (command === 'accounts') {
+      const accounts = await getAccounts();
+      console.log(`\n  Ascend Accounts:\n`);
+      for (const a of accounts) {
+        console.log(`  ID ${a.id}  ${a.chain_type ?? '?'}  ${a.address ?? '—'}  Balance: $${a.balance?.toFixed(2) ?? '0.00'}`);
+      }
+    } else if (command === 'positions') {
+      const address = rest[0];
+      if (!address) {
+        console.error('Usage: midnight-agent ascend positions <address>');
+        process.exit(1);
+      }
+      const positions = await getPositions(address);
+      if (!positions.length) {
+        console.log(`\n  No open positions for ${address}`);
+      } else {
+        console.log(`\n  Ascend Positions — ${address.slice(0, 20)}...\n`);
+        for (const p of positions) {
+          const pnlStr = p.pnl !== null ? `$${p.pnl.toFixed(2)}` : '—';
+          const lev = p.leverage !== null ? `${p.leverage}x` : '—';
+          console.log(`  #${p.id}  ${(p.slug ?? '?').padEnd(24)}  ${(p.side ?? '?').padEnd(4)}  ${lev.padEnd(5)}  PnL: ${pnlStr}  [${p.status ?? '?'}]`);
+        }
+      }
+    } else if (command === 'order') {
+      const market = arg('market');
+      const side = arg('side') as OrderSide | undefined;
+      const margin = arg('margin');
+      const leverage = arg('leverage');
+      if (!market || !side || !margin || !leverage) {
+        console.error('Usage: midnight-agent ascend order --market <slug> --side YES|NO --margin <n> --leverage <n>');
+        process.exit(1);
+      }
+      const orderType = (arg('type') ?? 'MARKET') as OrderType;
+      const chainType = (arg('chain') ?? 'MIDNIGHT') as ChainType;
+      const triggerPrice = arg('trigger-price');
+
+      let address = arg('address');
+      if (!address) {
+        const accounts = await getAccounts();
+        const midnightAcct = accounts.find((a) => a.chain_type === chainType);
+        if (!midnightAcct?.address) {
+          console.error(`  No ${chainType} address linked to your API key. Link one at testnet.ascend.market`);
+          process.exit(1);
+        }
+        address = midnightAcct.address;
+      }
+
+      const summary = await getMarketSummary(market);
+      console.log(`\n  Pre-trade Summary`);
+      console.log(`  ─────────────────────────────`);
+      console.log(`  Market:     ${summary.title}`);
+      console.log(`  Mark price: ${summary.mark_price !== null ? (summary.mark_price * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Best bid:   ${summary.bestBid !== null ? (summary.bestBid * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Best ask:   ${summary.bestAsk !== null ? (summary.bestAsk * 100).toFixed(2) + '%' : '—'}`);
+      console.log(`  Side:       ${side}`);
+      console.log(`  Type:       ${orderType}`);
+      console.log(`  Margin:     $${margin}`);
+      console.log(`  Leverage:   ${leverage}x`);
+      console.log(`  Chain:      ${chainType}`);
+      console.log(`  Address:    ${address}`);
+      if (triggerPrice) console.log(`  Trigger:    ${triggerPrice}`);
+
+      const params: Parameters<typeof createOrder>[0] = {
+        chain_type: chainType,
+        address,
+        market,
+        side,
+        margin: Number(margin),
+        leverage: Number(leverage),
+        type: orderType,
+      };
+      if (triggerPrice) params.trigger_price = Number(triggerPrice);
+
+      console.log(`\n  Placing order...`);
+      const result = await createOrder(params);
+      console.log(`  Success: ${result.success}`);
+      if (result.client_order_id) {
+        console.log(`  Order ID: ${result.client_order_id}`);
+        console.log(`  Liquidation: ${result.liquidation_price ?? '—'}`);
+        console.log(`  Profit:      ${result.profit_price ?? '—'}`);
+        console.log(`\n  Polling for acceptance...`);
+        const poll = await waitForOrder(result.client_order_id, orderType);
+        if (poll.data) {
+          console.log(`  Order accepted: ${poll.data.event_type}`);
+        } else if (poll.error) {
+          console.error(`  Order error: ${poll.error.message}`);
+        }
+      }
+    } else if (command === 'close') {
+      const orderId = arg('order-id');
+      const address = arg('address');
+      if (!orderId || !address) {
+        console.error('Usage: midnight-agent ascend close --order-id <n> --address <addr>');
+        process.exit(1);
+      }
+      const chainType = (arg('chain') ?? 'MIDNIGHT') as ChainType;
+      console.log(`\n  Closing position #${orderId}...`);
+      const result = await closePosition({
+        chain_type: chainType,
+        order_id: Number(orderId),
+        user_address: address,
+      });
+      console.log(`  Success: ${result.success}`);
+      if (result.client_order_id) {
+        console.log(`  Polling for settlement...`);
+        const poll = await waitForClose(result.client_order_id);
+        console.log(`  Settled: ${JSON.stringify(poll.data ?? poll.error)}`);
+      }
+    } else if (command === 'cancel') {
+      const orderId = arg('order-id');
+      const address = arg('address');
+      if (!orderId || !address) {
+        console.error('Usage: midnight-agent ascend cancel --order-id <n> --address <addr>');
+        process.exit(1);
+      }
+      const chainType = (arg('chain') ?? 'MIDNIGHT') as ChainType;
+      console.log(`\n  Cancelling order #${orderId}...`);
+      const result = await cancelOrder({
+        chain_type: chainType,
+        order_id: Number(orderId),
+        user_address: address,
+      });
+      console.log(`  Success: ${result.success}`);
+      console.log(`  Client order ID: ${result.client_order_id}`);
+    } else {
+      console.error(`Unknown ascend command: ${command}`);
+      usage();
+      process.exit(1);
+    }
+  }
+
+  else {
     console.error(`Unknown domain: ${domain}`);
     usage();
     process.exit(1);

@@ -26,6 +26,7 @@ Midnight is a privacy-preserving Substrate-based sidechain bridged to Cardano vi
 | `src/transfer.ts` | Shielded, unshielded, and combined token transfers; DUST management; atomic swaps |
 | `src/token.ts` | FungibleToken contract deployment and interaction |
 | `src/dex.ts` | DEX pool discovery, swap estimation, and execution scaffold |
+| `src/ascend.ts` | Ascend prediction market client (research, trade, manage positions) |
 | `src/cli.ts` | CLI entry point for all operations |
 
 ## Setup
@@ -127,9 +128,38 @@ npm run dev -- transfer unshielded --to mn_addr1... --amount 1000000
 # Send shielded tokens
 npm run dev -- transfer shielded --to mn_shield-addr1... --amount 1000000
 
-# Register NIGHT for DUST generation
+# Register NIGHT for DUST generation (legacy alias)
 npm run dev -- transfer register-dust
 ```
+
+### DUST Management
+
+DUST is Midnight's non-transferable fee token, generated continuously by holding NIGHT. You must register your NIGHT UTXOs before DUST accrues.
+
+```bash
+# Check DUST status (balance, registration state, NIGHT balance)
+npm run dev -- dust status
+
+# Register NIGHT UTXOs for DUST generation (waits for DUST to accrue)
+npm run dev -- dust register
+
+# Register without waiting for accrual
+npm run dev -- dust register --no-wait
+```
+
+**DUST economics**: 5 DUST per NIGHT, ~1 week to reach cap, 3-hour grace period after NIGHT is spent. On testnet, 1000 tNight from the faucet generates ample DUST for dozens of deployments.
+
+**Testnet flow**:
+1. `npm run dev -- wallet create`
+2. Get tNight from the [preprod faucet](https://faucet.preprod.midnight.network/)
+3. `npm run dev -- dust register`
+4. Deploy: `npm run dev -- token deploy --name MyToken --ticker MTK --decimals 6 --supply 12000000000000000`
+
+**Mainnet flow**:
+1. Buy cNIGHT on Cardano (via the Python build: `python3 swap_ada_to_token.py --token NIGHT`)
+2. Register at [Nethermind DUST Dashboard](https://midnight-dust-mainnet.nethermind.dev/dashboard) or via the Midnight wallet
+3. `npm run dev -- dust register`
+4. Deploy when DUST is available
 
 ### Token Operations
 
@@ -165,6 +195,27 @@ npm run dev -- dex estimate --pool <ADDR> --amount 1000000 --direction a_to_b
 
 # Discover pools (placeholder — populates as DEXes launch on mainnet)
 npm run dev -- dex discover
+```
+
+### Ascend Prediction Market
+
+Ascend is a ZK-enforced perpetuals DEX for outcome probabilities, finalized on Midnight. Public endpoints work without auth; trading requires an API key from [testnet.ascend.market](https://testnet.ascend.market).
+
+```bash
+# Market research (no auth)
+npm run dev -- ascend markets
+npm run dev -- ascend market btc-100k-eoy
+npm run dev -- ascend orderbook btc-100k-eoy
+npm run dev -- ascend events btc-100k-eoy --range 1W
+npm run dev -- ascend ticker BTC
+npm run dev -- ascend leaderboard --limit 10
+
+# Trading (requires ASCEND_API_KEY in .env)
+npm run dev -- ascend accounts
+npm run dev -- ascend positions <address>
+npm run dev -- ascend order --market btc-100k-eoy --side YES --margin 10 --leverage 2
+npm run dev -- ascend close --order-id 123 --address <addr>
+npm run dev -- ascend cancel --order-id 123 --address <addr>
 ```
 
 ## TypeScript API
@@ -290,3 +341,5 @@ npm run dev -- token connect <contract_address>
 | `MIDNIGHT_EXPLORER_URL` | No | Block explorer URL |
 | `MIDNIGHT_WALLET_SEED` | No | Wallet seed as hex (alternative to seed file) |
 | `MIDNIGHT_WALLET_DIR` | No | Custom wallet directory (default: `~/.agent-lump/midnight`) |
+| `ASCEND_API_URL` | No | Ascend API base URL (default: preview endpoint) |
+| `ASCEND_API_KEY` | For trading | API key from [testnet.ascend.market](https://testnet.ascend.market) |

@@ -15,6 +15,11 @@
  *   DustWallet       — Manages DUST for transaction fees
  */
 
+import { WebSocket } from 'ws';
+if (!globalThis.WebSocket) {
+  (globalThis as any).WebSocket = WebSocket;
+}
+
 import { randomBytes } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -35,9 +40,12 @@ import {
   createKeystore,
   PublicKey,
   UnshieldedWallet,
-  InMemoryTransactionHistoryStorage,
   type UnshieldedKeystore,
 } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import {
+  InMemoryTransactionHistoryStorage,
+  TransactionHistoryStorage as TxHistoryStorage,
+} from '@midnight-ntwrk/wallet-sdk-abstractions';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { getConfig, type NetworkId } from './config.js';
@@ -228,6 +236,7 @@ export interface InitializedWallet {
 
 export async function initWallet(
   walletDir?: string,
+  options?: { waitForSync?: boolean; syncTimeoutMs?: number },
 ): Promise<InitializedWallet> {
   const config = getConfig();
   setNetworkId(config.networkId);
@@ -244,14 +253,19 @@ export async function initWallet(
 
   const configuration: DefaultConfiguration = {
     networkId: config.networkId,
-    costParameters: { feeBlocksMargin: 5 },
+    costParameters: {
+      additionalFeeOverhead: 300_000_000_000_000n,
+      feeBlocksMargin: 5,
+    },
     relayURL: new URL(config.rpcWssUrl),
     provingServerUrl: new URL(config.proverUrl),
     indexerClientConnection: {
       indexerHttpUrl: config.indexerUrl,
       indexerWsUrl: config.indexerWsUrl,
     },
-    txHistoryStorage: new InMemoryTransactionHistoryStorage(),
+    txHistoryStorage: new InMemoryTransactionHistoryStorage(
+      TxHistoryStorage.TransactionHistoryCommonSchema,
+    ),
   };
 
   const facade = await WalletFacade.init({
@@ -271,7 +285,62 @@ export async function initWallet(
 
   await facade.start(keys.shielded.keys, keys.dust.key);
 
+  if (options?.waitForSync !== false) {
+    const envMs = parseInt(process.env.MIDNIGHT_WALLET_SYNC_TIMEOUT_MS ?? '', 10);
+    const syncTimeoutMs =
+      options?.syncTimeoutMs ??
+      (Number.isFinite(envMs) && envMs > 0 ? envMs : 600_000);
+    console.log(`  Waiting for wallet sync (timeout: ${syncTimeoutMs / 1000}s)...`);
+
+    const syncResult = await Promise.race([
+      facade.waitForSyncedState().then(() => 'synced' as const),
+      waitForSyncWithProgress(facade, syncTimeoutMs),
+    ]);
+    if (syncResult === 'timeout') {
+      console.log('  Wallet sync timed out — proceeding with partial state.');
+    } else {
+      console.log('  Wallet synced.');
+    }
+  }
+
   return { facade, keys, keystore: unshieldedKeystore, addresses };
+}
+
+function waitForSyncWithProgress(
+  facade: WalletFacade,
+  timeoutMs: number,
+): Promise<'timeout'> {
+  return new Promise((resolve) => {
+    let lastLog = 0;
+    const interval = setInterval(() => {
+      lastLog++;
+    }, 1000);
+
+    const sub = facade.state().subscribe({
+      next: (state) => {
+        if (lastLog < 10) return;
+        lastLog = 0;
+        const sh = state.shielded.progress;
+        const du = state.dust.progress;
+        const shPct = sh && sh.highestRelevantWalletIndex
+          ? ((Number(sh.appliedIndex) / Number(sh.highestRelevantWalletIndex)) * 100).toFixed(1)
+          : '?';
+        const duPct = du && du.highestRelevantWalletIndex
+          ? ((Number(du.appliedIndex) / Number(du.highestRelevantWalletIndex)) * 100).toFixed(1)
+          : '?';
+        console.log(
+          `  Sync progress: shielded ${shPct}% (${sh?.appliedIndex}/${sh?.highestRelevantWalletIndex})` +
+          ` | dust ${duPct}% (${du?.appliedIndex}/${du?.highestRelevantWalletIndex})`,
+        );
+      },
+    });
+
+    setTimeout(() => {
+      clearInterval(interval);
+      sub.unsubscribe();
+      resolve('timeout');
+    }, timeoutMs);
+  });
 }
 
 /**

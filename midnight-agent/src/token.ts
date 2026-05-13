@@ -22,6 +22,7 @@ import { pathToFileURL } from 'url';
 import { existsSync } from 'fs';
 import type { InitializedWallet } from './wallet.js';
 import { getConfig, explorerLink } from './config.js';
+import { getDustStatus, formatNight, formatDust } from './transfer.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -46,6 +47,14 @@ export interface TokenDeployParams {
   metadata: TokenMetadata;
   /** ZswapCoinPublicKey of the recipient for the initial supply */
   recipientPublicKey?: string;
+  /** Use gas sponsorship via remote prover (default: true) */
+  useGasSponsorship?: boolean;
+  /** Prove locally then send proven tx to remote for DUST balancing + submission */
+  localProve?: boolean;
+  /** URL of the local proof server (default: http://localhost:6300) */
+  localProverUrl?: string;
+  /** URL of the remote gas-sponsoring server for submission */
+  remoteSubmitUrl?: string;
 }
 
 // ─── Contract Loading ───────────────────────────────────────────────────
@@ -73,6 +82,99 @@ export async function loadCompiledContract(contractDir?: string) {
   return { contractModule, dir };
 }
 
+// ─── Pre-Deploy Readiness Checks ────────────────────────────────────────
+
+export interface PreflightResult {
+  ready: boolean;
+  contractCompiled: boolean;
+  proverReachable: boolean;
+  walletHasNight: boolean;
+  walletHasDust: boolean;
+  nightBalance?: string;
+  dustBalance?: string;
+  errors: string[];
+  warnings: string[];
+}
+
+export async function preflightCheck(
+  wallet: InitializedWallet | null,
+  contractDir?: string,
+  options?: { useGasSponsorship?: boolean },
+): Promise<PreflightResult> {
+  const config = getConfig();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const dir = (contractDir && contractDir.length > 0) ? contractDir : DEFAULT_CONTRACT_DIR;
+  const contractJsPath = path.join(dir, 'contract', 'index.js');
+  const contractCompiled = existsSync(contractJsPath);
+  if (!contractCompiled) {
+    errors.push(`Compiled contract not found at ${contractJsPath}. Run: npm run compact:compile`);
+  }
+
+  let proverReachable = false;
+  try {
+    const proverUrl = config.proverUrl;
+    const resp = await fetch(`${proverUrl}/health`, { signal: AbortSignal.timeout(30_000) });
+    proverReachable = resp.ok;
+    if (!proverReachable) {
+      errors.push(`Proof server at ${proverUrl} returned ${resp.status}`);
+    }
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (msg.includes('ECONNREFUSED')) {
+      errors.push(`Proof server not running at ${config.proverUrl}. Start it with: docker compose -f proof-server.yml up`);
+    } else {
+      errors.push(`Proof server unreachable: ${msg.slice(0, 200)}`);
+    }
+  }
+
+  let walletHasNight = false;
+  let walletHasDust = false;
+  let nightBalance: string | undefined;
+  let dustBalance: string | undefined;
+
+  const useSponsorship = options?.useGasSponsorship ?? true;
+
+  if (!useSponsorship && wallet?.facade) {
+    try {
+      const status = await getDustStatus(wallet);
+      walletHasNight = status.hasNight;
+      walletHasDust = status.hasDust;
+      nightBalance = formatNight(status.nightBalance);
+      dustBalance = formatDust(status.dustBalance);
+
+      if (!walletHasDust) {
+        errors.push(`No DUST available (balance: ${dustBalance}). Register NIGHT for DUST: npm run dev -- dust register`);
+      }
+      if (!walletHasNight) {
+        warnings.push(`No NIGHT balance. DUST will stop accruing when existing DUST is spent.`);
+      }
+    } catch (e: any) {
+      warnings.push(`Could not check wallet balances: ${e?.message?.slice(0, 200)}`);
+    }
+  } else if (!useSponsorship && !wallet?.facade) {
+    walletHasDust = true;
+    warnings.push(`DUST balance not checked (wallet not initialized). Will be verified at deploy time.`);
+  } else if (useSponsorship) {
+    walletHasDust = true;
+  }
+
+  const ready = contractCompiled && proverReachable && (useSponsorship || walletHasDust);
+
+  return {
+    ready,
+    contractCompiled,
+    proverReachable,
+    walletHasNight,
+    walletHasDust,
+    nightBalance,
+    dustBalance,
+    errors,
+    warnings,
+  };
+}
+
 // ─── Deployment ─────────────────────────────────────────────────────────
 
 export async function deployToken(
@@ -92,7 +194,12 @@ export async function deployToken(
     (CompiledContract as any).withCompiledFileAssets(dir),
   );
 
-  const providers = await createContractProviders(wallet, dir);
+  const providers = await createContractProviders(wallet, dir, {
+    useGasSponsorship: params.useGasSponsorship ?? true,
+    localProve: params.localProve,
+    localProverUrl: params.localProverUrl,
+    remoteSubmitUrl: params.remoteSubmitUrl,
+  });
 
   // Build the recipient as Either<ZswapCoinPublicKey, ContractAddress> (left = ZswapCoinPublicKey)
   const recipientPubKey = params.recipientPublicKey ?? wallet.keys.shielded.keys.coinPublicKey;
@@ -196,7 +303,7 @@ export async function connectToken(
 async function createContractProviders(
   wallet: InitializedWallet,
   zkConfigPath: string,
-  options?: { useGasSponsorship?: boolean },
+  options?: { useGasSponsorship?: boolean; localProve?: boolean; localProverUrl?: string; remoteSubmitUrl?: string },
 ) {
   const { httpClientProofProvider } = await import(
     '@midnight-ntwrk/midnight-js-http-client-proof-provider'
@@ -211,49 +318,142 @@ async function createContractProviders(
   const config = getConfig();
   const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
   const useSponsorship = options?.useGasSponsorship ?? true;
+  const useLocalProve = options?.localProve ?? false;
+  const localProverUrl = options?.localProverUrl ?? 'http://localhost:6300';
+  const remoteSubmitUrl = options?.remoteSubmitUrl ?? 'https://api.1am.xyz';
 
   let walletProvider: any;
 
-  if (useSponsorship) {
-    // Use remote proof server gas sponsorship — the server handles DUST balancing
-    console.log('  Using remote proof server for gas sponsorship...');
-    // Create standard proof provider to prove via /prove (sends ZK circuit data)
-    const proofProv = httpClientProofProvider(config.proverUrl, zkConfigProvider);
+  if (useLocalProve) {
+    console.log(`  Hybrid mode: local proving (${localProverUrl}) + remote submission (${remoteSubmitUrl})`);
+    const localProofProv = httpClientProofProvider(localProverUrl, zkConfigProvider);
 
     walletProvider = {
       getCoinPublicKey: () => wallet.keys.shielded.keys.coinPublicKey,
       getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
       async balanceTx(tx: unknown, _ttl?: Date) {
-        // Step 1: Prove the tx via /prove (includes ZK circuit data)
-        console.log('  Proving transaction via remote prover...');
-        const proven = await proofProv.proveTx(tx as any);
-        console.log('  Transaction proved successfully.');
-        return proven;
-      },
-      async submitTx(tx: unknown) {
-        // Step 2: Send proven tx to /balance-and-submit for DUST sponsorship
-        const serialized = serializeTransaction(tx);
-        // Debug: check if tx is actually proven
-        const txStr = tx && typeof (tx as any).toString === 'function' ? (tx as any).toString() : '';
-        const isProven = txStr.includes('proof,') && !txStr.includes('proof-preimage');
-        console.log(`  Submitting for DUST balancing (${serialized.length} bytes, proven=${isProven})...`);
-        console.log(`  TX header: ${serialized.slice(0, 100).toString('utf8').replace(/[^\x20-\x7E]/g, '?')}`);
+        // The SDK's proofProvider (local httpClientProofProvider) has already proven this tx
+        // before balanceTx is called. We just need to send it to the remote for DUST balancing + submission.
+        const provenBytes = (tx as any).serialize();
+        console.log(`  Locally-proven tx: ${provenBytes.length} bytes`);
 
-        const resp = await fetch(`${config.proverUrl}/balance-and-submit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: serialized,
-        });
+        const maxRetries = 5;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          console.log(`  POST ${remoteSubmitUrl}/balance-and-submit (attempt ${attempt}/${maxRetries})`);
+          const resp = await fetch(`${remoteSubmitUrl}/balance-and-submit`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'X-Client-Name': 'midnight-agent',
+            },
+            body: provenBytes,
+          });
 
-        if (!resp.ok) {
-          const err = await resp.text();
-          throw new Error(`Prove-and-submit failed (${resp.status}): ${err}`);
+          const respText = await resp.text();
+          console.log(`  /balance-and-submit response (${resp.status}): ${respText.slice(0, 500)}`);
+
+          if (resp.ok) {
+            const result = JSON.parse(respText);
+            const txHash = result.txHash ?? result.hash;
+            if (txHash) {
+              console.log(`  Remote balanced + submitted: ${txHash}`);
+              if (result.contractAddresses) {
+                console.log(`  contractAddresses: ${JSON.stringify(result.contractAddresses)}`);
+              }
+              (walletProvider as any)._submittedTxHash = txHash;
+              (walletProvider as any)._contractAddresses = result.contractAddresses;
+              return tx;
+            }
+          }
+
+          let retryMs = 60_000;
+          try {
+            const errResult = JSON.parse(respText);
+            if (errResult.retryAfterMs) retryMs = errResult.retryAfterMs;
+            console.log(`  Error: ${errResult.error} — ${errResult.message}`);
+          } catch {
+            console.log(`  Error: ${respText.slice(0, 200)}`);
+          }
+
+          if (attempt < maxRetries) {
+            console.log(`  Waiting ${retryMs / 1000}s before retry...`);
+            await new Promise(r => setTimeout(r, retryMs));
+          }
         }
 
-        const result = await resp.json() as { txHash: string; submitted: boolean };
-        console.log(`  Proof server submitted tx: ${result.txHash}`);
-        return result.txHash;
+        throw new Error('Hybrid deploy failed: remote submission exhausted all retries');
       },
+      async submitTx(tx: unknown) {
+        const storedHash = (walletProvider as any)._submittedTxHash;
+        if (storedHash) return storedHash;
+        throw new Error('No stored tx hash — balanceTx should have submitted via remote');
+      },
+    };
+  } else if (useSponsorship) {
+    console.log('  Using remote prover for ZK proving, local wallet for DUST balancing + submission...');
+
+    const submitWithPoolRetry = async (tx: unknown) => {
+      const max = 5;
+      let lastErr: unknown;
+      for (let i = 1; i <= max; i++) {
+        try {
+          return await wallet.facade.submitTransaction(tx as never);
+        } catch (e: unknown) {
+          lastErr = e;
+          const cause =
+            e instanceof Error && (e as Error).cause != null
+              ? String((e as Error).cause)
+              : '';
+          const msg = `${e instanceof Error ? e.message : String(e)} ${cause}`;
+          const maybePool =
+            msg.includes('1016') ||
+            msg.includes('Immediately Dropped') ||
+            msg.includes('Transaction submission') ||
+            /pool|limit|dropped|busy/i.test(msg);
+          if (maybePool && i < max) {
+            const waitMs = 25_000 * i;
+            console.log(
+              `  Submit failed (attempt ${i}/${max}) — retry in ${waitMs / 1000}s (${msg.slice(0, 120)})`,
+            );
+            await new Promise((r) => setTimeout(r, waitMs));
+            continue;
+          }
+          throw e;
+        }
+      }
+      throw lastErr;
+    };
+
+    walletProvider = {
+      getCoinPublicKey: () => wallet.keys.shielded.keys.coinPublicKey,
+      getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
+      async balanceTx(tx: unknown, ttl?: Date) {
+        const recipe = await wallet.facade.balanceUnboundTransaction(
+          tx as never,
+          {
+            shieldedSecretKeys: wallet.keys.shielded.keys,
+            dustSecretKey: wallet.keys.dust.key,
+          },
+          { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
+        );
+
+        const signFn = (payload: Uint8Array) =>
+          wallet.keystore.signData(payload);
+
+        signTransactionIntents(
+          recipe.baseTransaction as TransactionWithIntents,
+          signFn,
+        );
+        if (recipe.balancingTransaction) {
+          signTransactionIntents(
+            recipe.balancingTransaction as TransactionWithIntents,
+            signFn,
+          );
+        }
+
+        return wallet.facade.finalizeRecipe(recipe);
+      },
+      submitTx: (tx: unknown) => submitWithPoolRetry(tx),
     };
   } else {
     // Standard SDK flow — requires local DUST balance
@@ -299,8 +499,8 @@ async function createContractProviders(
       config.indexerWsUrl,
     ),
     zkConfigProvider,
-    proofProvider: useSponsorship
-      ? createPassthroughProofProvider()
+    proofProvider: useLocalProve
+      ? httpClientProofProvider(localProverUrl, zkConfigProvider) // prove locally, send PROVEN tx to /balance-and-submit
       : httpClientProofProvider(config.proverUrl, zkConfigProvider),
     walletProvider,
     midnightProvider: walletProvider,
