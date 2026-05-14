@@ -34,7 +34,11 @@ import {
   ShieldedCoinPublicKey,
   ShieldedEncryptionPublicKey,
 } from '@midnight-ntwrk/wallet-sdk-address-format';
-import { WalletFacade, type DefaultConfiguration } from '@midnight-ntwrk/wallet-sdk-facade';
+import {
+  WalletFacade,
+  type DefaultConfiguration,
+  type TermsAndConditions,
+} from '@midnight-ntwrk/wallet-sdk-facade';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
 import {
   createKeystore,
@@ -389,4 +393,23 @@ export async function getBalances(
     dustCoinCount: state.dust.totalCoins.length,
     dustBalance: state.dust.balance(new Date()),
   };
+}
+
+// ─── Terms & Conditions ─────────────────────────────────────────────────
+
+/**
+ * Fetch the current Midnight Terms and Conditions from the network indexer.
+ *
+ * Static SDK call — does not require an initialized wallet. Returns the document
+ * URL plus a SHA-256 hash for content verification. Wallet builders should display
+ * the T&C to end users before initialization and persist the acknowledged hash.
+ */
+export async function getTermsAndConditions(): Promise<TermsAndConditions> {
+  const config = getConfig();
+  return WalletFacade.fetchTermsAndConditions({
+    indexerClientConnection: {
+      indexerHttpUrl: config.indexerUrl,
+      indexerWsUrl: config.indexerWsUrl,
+    },
+  });
 }

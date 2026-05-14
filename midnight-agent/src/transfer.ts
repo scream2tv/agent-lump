@@ -15,10 +15,11 @@ import {
   UnshieldedAddress,
   ShieldedAddress,
 } from '@midnight-ntwrk/wallet-sdk-address-format';
-import type {
-  UnshieldedTokenTransfer,
-  ShieldedTokenTransfer,
-  CombinedTokenTransfer,
+import {
+  BalancingRecipe,
+  type UnshieldedTokenTransfer,
+  type ShieldedTokenTransfer,
+  type CombinedTokenTransfer,
 } from '@midnight-ntwrk/wallet-sdk-facade';
 import type { InitializedWallet } from './wallet.js';
 import { getConfig } from './config.js';
@@ -33,6 +34,15 @@ export interface TransferResult {
   success: boolean;
   txHash?: string;
   error?: string;
+  /** Fee paid by the submitted transaction in DUST specks (excludes balancing tx). */
+  fee?: bigint;
+}
+
+export interface FeeEstimate {
+  /** Fee for the transfer transaction only, in DUST specks. */
+  transactionFee: bigint;
+  /** Total fee including the balancing transaction, in DUST specks. */
+  totalFee: bigint;
 }
 
 function parseUnshieldedAddress(bech32: string): UnshieldedAddress {
@@ -79,9 +89,10 @@ export async function transferUnshielded(
       wallet.keystore.signData(payload),
     );
     const finalized = await wallet.facade.finalizeRecipe(signed);
+    const fee = await wallet.facade.calculateTransactionFee(finalized);
     const txId = await wallet.facade.submitTransaction(finalized);
 
-    return { success: true, txHash: txId };
+    return { success: true, txHash: txId, fee };
   } catch (e) {
     return {
       success: false,
@@ -119,9 +130,10 @@ export async function transferShielded(
     );
 
     const finalized = await wallet.facade.finalizeRecipe(recipe);
+    const fee = await wallet.facade.calculateTransactionFee(finalized);
     const txId = await wallet.facade.submitTransaction(finalized);
 
-    return { success: true, txHash: txId };
+    return { success: true, txHash: txId, fee };
   } catch (e) {
     return {
       success: false,
@@ -182,15 +194,78 @@ export async function transferCombined(
       wallet.keystore.signData(payload),
     );
     const finalized = await wallet.facade.finalizeRecipe(signed);
+    const fee = await wallet.facade.calculateTransactionFee(finalized);
     const txId = await wallet.facade.submitTransaction(finalized);
 
-    return { success: true, txHash: txId };
+    return { success: true, txHash: txId, fee };
   } catch (e) {
     return {
       success: false,
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+// ─── Fee Estimation ─────────────────────────────────────────────────────
+
+/**
+ * Estimate fees for a hypothetical transfer without submitting.
+ *
+ * Builds the transfer recipe and queries both:
+ *   - calculateTransactionFee — the transfer transaction's fee in isolation
+ *   - estimateTransactionFee  — total fee including the balancing transaction
+ *
+ * Use the total to budget; use the per-transaction figure to compare against the
+ * fee actually paid (returned in TransferResult.fee after submission).
+ */
+export async function estimateTransferFee(
+  wallet: InitializedWallet,
+  params: CombinedTransferParams,
+  ttlMinutes = 30,
+): Promise<FeeEstimate> {
+  const ttl = new Date(Date.now() + ttlMinutes * 60 * 1000);
+  const transferParts: CombinedTokenTransfer[] = [];
+
+  if (params.unshielded.length > 0) {
+    transferParts.push({
+      type: 'unshielded',
+      outputs: params.unshielded.map((o) => ({
+        amount: o.amount,
+        receiverAddress: parseUnshieldedAddress(o.receiverAddress),
+        type: o.tokenType ?? ledger.nativeToken().raw,
+      })),
+    } satisfies UnshieldedTokenTransfer);
+  }
+
+  if (params.shielded.length > 0) {
+    transferParts.push({
+      type: 'shielded',
+      outputs: params.shielded.map((o) => ({
+        amount: o.amount,
+        receiverAddress: parseShieldedAddress(o.receiverAddress),
+        type: o.tokenType ?? ledger.nativeToken().raw,
+      })),
+    } satisfies ShieldedTokenTransfer);
+  }
+
+  const recipe = await wallet.facade.transferTransaction(
+    transferParts,
+    {
+      shieldedSecretKeys: wallet.keys.shielded.keys,
+      dustSecretKey: wallet.keys.dust.key,
+    },
+    { ttl },
+  );
+
+  const [tx] = BalancingRecipe.getTransactions(recipe);
+  const transactionFee = await wallet.facade.calculateTransactionFee(tx);
+  const totalFee = await wallet.facade.estimateTransactionFee(
+    tx,
+    wallet.keys.dust.key,
+    { ttl },
+  );
+
+  return { transactionFee, totalFee };
 }
 
 // ─── DUST Management ────────────────────────────────────────────────────

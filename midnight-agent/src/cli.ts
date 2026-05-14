@@ -39,10 +39,12 @@ import {
   initWalletKeysOnly,
   stopWallet,
   getBalances,
+  getTermsAndConditions,
 } from './wallet.js';
 import {
   transferUnshielded,
   transferShielded,
+  estimateTransferFee,
   registerNightForDust,
   getDustStatus,
   formatNight,
@@ -116,9 +118,13 @@ function usage(): void {
     wallet    create                        Generate new wallet
               status                        Show wallet addresses
               balances                      Show token balances (requires sync)
+              terms                         Show network Terms & Conditions (no wallet sync)
 
     transfer  unshielded --to <addr> --amount <n>    Send NIGHT
               shielded --to <addr> --amount <n>      Send shielded tokens
+              estimate [--unshielded-to <addr> --unshielded-amount <n>]
+                       [--shielded-to <addr> --shielded-amount <n>]
+                                                     Preview transfer fees (no submit)
               register-dust                          Register NIGHT for DUST generation
 
     dust      status                        Show DUST balance and registration state
@@ -320,6 +326,18 @@ async function main(): Promise<void> {
       } finally {
         await stopWallet(wallet);
       }
+    } else if (command === 'terms') {
+      try {
+        const tnc = await getTermsAndConditions();
+        console.log(`\n  Midnight Network Terms & Conditions`);
+        console.log(`    URL:  ${tnc.url}`);
+        console.log(`    Hash: ${tnc.hash}`);
+      } catch (e) {
+        console.error(
+          `\n  Failed to fetch Terms & Conditions: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        process.exit(1);
+      }
     } else {
       console.error(`Unknown wallet command: ${command}`);
       usage();
@@ -347,6 +365,9 @@ async function main(): Promise<void> {
         ]);
         if (result.success) {
           console.log(`  Transfer submitted: ${result.txHash}`);
+          if (result.fee !== undefined) {
+            console.log(`  Fee paid: ${formatDust(result.fee)} DUST`);
+          }
         } else {
           console.error(`  Transfer failed: ${result.error}`);
         }
@@ -370,6 +391,9 @@ async function main(): Promise<void> {
         ]);
         if (result.success) {
           console.log(`  Transfer submitted: ${result.txHash}`);
+          if (result.fee !== undefined) {
+            console.log(`  Fee paid: ${formatDust(result.fee)} DUST`);
+          }
         } else {
           console.error(`  Transfer failed: ${result.error}`);
         }
@@ -386,6 +410,38 @@ async function main(): Promise<void> {
         } else {
           console.error(`  Registration failed: ${result.error}`);
         }
+      } finally {
+        await stopWallet(wallet);
+      }
+    } else if (command === 'estimate') {
+      const unshieldedTo = arg('unshielded-to');
+      const unshieldedAmount = arg('unshielded-amount');
+      const shieldedTo = arg('shielded-to');
+      const shieldedAmount = arg('shielded-amount');
+      if (
+        (!unshieldedTo || !unshieldedAmount) &&
+        (!shieldedTo || !shieldedAmount)
+      ) {
+        console.error(
+          'Usage: midnight-agent transfer estimate [--unshielded-to <a> --unshielded-amount <n>] [--shielded-to <a> --shielded-amount <n>]',
+        );
+        process.exit(1);
+      }
+      console.log('\n  Initializing wallet...');
+      const wallet = await initWallet();
+      try {
+        const est = await estimateTransferFee(wallet, {
+          unshielded:
+            unshieldedTo && unshieldedAmount
+              ? [{ amount: BigInt(unshieldedAmount), receiverAddress: unshieldedTo }]
+              : [],
+          shielded:
+            shieldedTo && shieldedAmount
+              ? [{ amount: BigInt(shieldedAmount), receiverAddress: shieldedTo }]
+              : [],
+        });
+        console.log(`  Transaction fee:  ${formatDust(est.transactionFee)} DUST`);
+        console.log(`  Total fee (incl. balancing): ${formatDust(est.totalFee)} DUST`);
       } finally {
         await stopWallet(wallet);
       }
