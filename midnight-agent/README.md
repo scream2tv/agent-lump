@@ -26,7 +26,6 @@ Midnight is a privacy-preserving Substrate-based sidechain bridged to Cardano vi
 | `src/transfer.ts` | Shielded, unshielded, and combined token transfers; DUST management; atomic swaps |
 | `src/token.ts` | FungibleToken contract deployment and interaction |
 | `src/dex.ts` | DEX pool discovery, swap estimation, and execution scaffold |
-| `src/ascend.ts` | Ascend prediction market client (research, trade, manage positions) |
 | `src/cli.ts` | CLI entry point for all operations |
 
 ## Setup
@@ -89,7 +88,7 @@ npm run dev -- chain tx <TX_HASH>
 # Recent transactions
 npm run dev -- chain txs --limit 20
 
-# Contract state (indexer or RPC)
+# Contract state + decoded Compact circuits (indexer, no API key) or raw RPC
 npm run dev -- chain contract <CONTRACT_ADDRESS>
 npm run dev -- chain contract-rpc <CONTRACT_ADDRESS>
 
@@ -197,27 +196,6 @@ npm run dev -- dex estimate --pool <ADDR> --amount 1000000 --direction a_to_b
 npm run dev -- dex discover
 ```
 
-### Ascend Prediction Market
-
-Ascend is a ZK-enforced perpetuals DEX for outcome probabilities, finalized on Midnight. Public endpoints work without auth; trading requires an API key from [testnet.ascend.market](https://testnet.ascend.market).
-
-```bash
-# Market research (no auth)
-npm run dev -- ascend markets
-npm run dev -- ascend market btc-100k-eoy
-npm run dev -- ascend orderbook btc-100k-eoy
-npm run dev -- ascend events btc-100k-eoy --range 1W
-npm run dev -- ascend ticker BTC
-npm run dev -- ascend leaderboard --limit 10
-
-# Trading (requires ASCEND_API_KEY in .env)
-npm run dev -- ascend accounts
-npm run dev -- ascend positions <address>
-npm run dev -- ascend order --market btc-100k-eoy --side YES --margin 10 --leverage 2
-npm run dev -- ascend close --order-id 123 --address <addr>
-npm run dev -- ascend cancel --order-id 123 --address <addr>
-```
-
 ## TypeScript API
 
 ```typescript
@@ -264,8 +242,8 @@ await stopWallet(w);
 | Property | Value |
 |---|---|
 | Chain name | Midnight Mainnet |
-| Node version | 0.22.1-9ce45781 |
-| Ledger version | 8.0.2 |
+| Node version | ~0.22.x |
+| Ledger version | 8.0.3 |
 | Genesis hash | `0x1941ca8e2bb88146c14dea084d3be7eb6e96ca7135429c543848b628124f2854` |
 | RPC (HTTP) | `https://rpc.mainnet.midnight.network/` |
 | RPC (WSS) | `wss://rpc.mainnet.midnight.network` |
@@ -341,5 +319,3 @@ npm run dev -- token connect <contract_address>
 | `MIDNIGHT_EXPLORER_URL` | No | Block explorer URL |
 | `MIDNIGHT_WALLET_SEED` | No | Wallet seed as hex (alternative to seed file) |
 | `MIDNIGHT_WALLET_DIR` | No | Custom wallet directory (default: `~/.agent-lump/midnight`) |
-| `ASCEND_API_URL` | No | Ascend API base URL (default: preview endpoint) |
-| `ASCEND_API_KEY` | For trading | API key from [testnet.ascend.market](https://testnet.ascend.market) |
