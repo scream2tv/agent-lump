@@ -241,10 +241,30 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       const cs = await getContractState(address);
-      console.log(`\n  Contract (indexer): ${cs.address}`);
+      const ts = cs.tx.blockTimestamp
+        ? new Date(Number(cs.tx.blockTimestamp)).toISOString()
+        : '?';
+      const dust = (s: string | null) =>
+        s ? `${s} Specks (${(Number(s) / 1e15).toFixed(9)} DUST)` : 'n/a';
+      console.log(`\n  Contract: ${cs.address}`);
+      console.log(`  Latest action: ${cs.actionType}`);
+      if (cs.entryPoint) console.log(`  Entry point called: ${cs.entryPoint}`);
+      console.log(`  Tx:    ${cs.tx.hash}`);
+      console.log(`  Block: #${cs.tx.blockHeight}  (${ts})`);
+      console.log(`  Fees paid: ${dust(cs.tx.paidFees)}`);
       console.log(
-        `  State: ${cs.state ? JSON.stringify(cs.state, null, 2) : '(empty)'}`,
+        `  State size: ${Math.floor(cs.state.length / 2)} bytes` +
+          `  (zswap ${Math.floor(cs.zswapState.length / 2)} bytes)`,
       );
+      if (cs.unshieldedBalances.length) {
+        console.log('  Unshielded balances:');
+        for (const b of cs.unshieldedBalances)
+          console.log(`    ${b.tokenType.slice(0, 24)}…  ${b.amount}`);
+      } else {
+        console.log('  Unshielded balances: (none)');
+      }
+      console.log(`\n  Circuits / entry points (${cs.circuits.length}):`);
+      for (const c of cs.circuits) console.log(`    - ${c}`);
     } else if (command === 'contract-rpc') {
       const address = rest[0];
       if (!address) {

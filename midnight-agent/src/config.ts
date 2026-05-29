@@ -1,11 +1,15 @@
 /**
  * Network configuration for Midnight mainnet/preprod/preview.
  *
- * Confirmed mainnet config (March 2026):
- *   Chain:        Midnight Mainnet
- *   Node version: 0.22.1-9ce45781
- *   Ledger:       v8.0.2
+ * Mainnet (verified May 2026):
+ *   Chain:        Midnight Mainnet (genesis Mar 30 2026)
+ *   Node:         ~0.22.x
+ *   Ledger:       v8.0.3
+ *   Indexer API:  v4 (GraphQL) — https://indexer.mainnet.midnight.network/api/v4/graphql
  *   Genesis hash: 0x1941ca8e2bb88146c14dea084d3be7eb6e96ca7135429c543848b628124f2854
+ *
+ * Public indexer/RPC endpoints require no API key. The chain.ts queries target
+ * the v4 indexer schema (contractAction/block(offset)/transactions(offset)).
  */
 
 import 'dotenv/config';
@@ -27,8 +31,8 @@ const DEFAULTS: Record<NetworkId, MidnightConfig> = {
     networkId: 'mainnet',
     rpcUrl: 'https://rpc.mainnet.midnight.network/',
     rpcWssUrl: 'wss://rpc.mainnet.midnight.network',
-    indexerUrl: 'https://indexer.mainnet.midnight.network/api/v3/graphql',
-    indexerWsUrl: 'wss://indexer.mainnet.midnight.network/api/v3/graphql/ws',
+    indexerUrl: 'https://indexer.mainnet.midnight.network/api/v4/graphql',
+    indexerWsUrl: 'wss://indexer.mainnet.midnight.network/api/v4/graphql/ws',
     proverUrl: 'http://localhost:6300',
     explorerUrl: 'https://explorer.mainnet.midnight.network',
   },
@@ -36,8 +40,8 @@ const DEFAULTS: Record<NetworkId, MidnightConfig> = {
     networkId: 'preprod',
     rpcUrl: 'https://rpc.preprod.midnight.network/',
     rpcWssUrl: 'wss://rpc.preprod.midnight.network',
-    indexerUrl: 'https://indexer.preprod.midnight.network/api/v3/graphql',
-    indexerWsUrl: 'wss://indexer.preprod.midnight.network/api/v3/graphql/ws',
+    indexerUrl: 'https://indexer.preprod.midnight.network/api/v4/graphql',
+    indexerWsUrl: 'wss://indexer.preprod.midnight.network/api/v4/graphql/ws',
     proverUrl: 'http://localhost:6300',
     explorerUrl: 'https://explorer.preprod.midnight.network',
   },
@@ -45,8 +49,8 @@ const DEFAULTS: Record<NetworkId, MidnightConfig> = {
     networkId: 'preview',
     rpcUrl: 'https://rpc.preview.midnight.network/',
     rpcWssUrl: 'wss://rpc.preview.midnight.network',
-    indexerUrl: 'https://indexer.preview.midnight.network/api/v3/graphql',
-    indexerWsUrl: 'wss://indexer.preview.midnight.network/api/v3/graphql/ws',
+    indexerUrl: 'https://indexer.preview.midnight.network/api/v4/graphql',
+    indexerWsUrl: 'wss://indexer.preview.midnight.network/api/v4/graphql/ws',
     proverUrl: 'http://localhost:6300',
     explorerUrl: 'https://explorer.preview.midnight.network',
   },

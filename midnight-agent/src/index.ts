@@ -28,12 +28,15 @@ export {
   getTransaction,
   getRecentTransactions,
   getContractState,
+  decodeContractCircuits,
   getChainInfo,
   verifyNode,
   type NodeHealth,
   type SidechainStatus,
   type MidnightBlock,
   type MidnightTransaction,
+  type ContractBalance,
+  type ContractActionInfo,
   type ChainInfo,
 } from './chain.js';
 

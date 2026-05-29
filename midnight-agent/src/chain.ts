@@ -382,16 +382,104 @@ export async function getRecentTransactions(
 
 // ─── Contract Queries (Indexer) ─────────────────────────────────────────
 
+export interface ContractBalance {
+  /** Token type (hex-encoded). */
+  tokenType: string;
+  /** Balance in base units, as a string (may exceed Number.MAX_SAFE_INTEGER). */
+  amount: string;
+}
+
+export interface ContractActionInfo {
+  address: string;
+  /** GraphQL __typename: ContractDeploy | ContractCall | ContractUpdate. */
+  actionType: string;
+  /** Raw contract state blob (hex). Circuit names are embedded in here. */
+  state: string;
+  /** Raw Zswap state blob (hex). */
+  zswapState: string;
+  /** Unshielded token balances held by the contract. */
+  unshieldedBalances: ContractBalance[];
+  /** For ContractCall actions: the circuit/entry point that was invoked. */
+  entryPoint: string | null;
+  /** Exported circuit / entry-point names decoded from `state`. */
+  circuits: string[];
+  /** The transaction that produced this action. */
+  tx: {
+    hash: string;
+    protocolVersion: number;
+    blockHeight: number;
+    blockTimestamp: string;
+    /** Fees actually paid, in DUST base units (Specks). Null for system txs. */
+    paidFees: string | null;
+    estimatedFees: string | null;
+  };
+}
+
+/**
+ * Decode the exported circuit / entry-point names from a contract `state` blob.
+ *
+ * Midnight has no on-chain source verification, but Compact entry-point names
+ * are stored as ASCII inside the serialized `state[v6]` operation map. Each name
+ * is terminated by the byte sequence `00 b9` and prefixed by a 2-byte tag (whose
+ * second byte equals the first minus 4); this strips that framing. Assumes the
+ * conventional lowercase-first camelCase naming used by Compact circuits.
+ * Verified against live mainnet contracts (recovers full circuit sets exactly).
+ */
+export function decodeContractCircuits(stateHex: string): string[] {
+  if (!stateHex) return [];
+  const hex = stateHex.startsWith('0x') ? stateHex.slice(2) : stateHex;
+  const b = Buffer.from(hex, 'hex');
+  const isId = (c: number) =>
+    (c >= 0x30 && c <= 0x39) || // 0-9
+    (c >= 0x41 && c <= 0x5a) || // A-Z
+    (c >= 0x61 && c <= 0x7a) || // a-z
+    c === 0x5f; // _
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (let i = 0; i + 1 < b.length; i++) {
+    if (b[i] !== 0x00 || b[i + 1] !== 0xb9) continue; // entry-point terminator
+    let s = i;
+    while (s > 0 && isId(b[s - 1])) s--; // walk back over identifier bytes
+    let name = b.subarray(s, i).toString('ascii');
+    if (name.length >= 3 && name.charCodeAt(1) === name.charCodeAt(0) - 4) {
+      name = name.slice(2); // strip 2-byte framing tag (b1 === b0 - 4)
+    }
+    name = name.replace(/^[0-9]+/, '').replace(/^[A-Z]+(?=[a-z])/, ''); // residual tag bytes
+    if (/^[a-z][A-Za-z0-9_]{3,63}$/.test(name) && !seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * Read a contract's latest on-chain action from the indexer (v4 schema):
+ * full state, Zswap state, unshielded balances, the originating transaction
+ * (with DUST fees), and the decoded circuit set. No API key required.
+ */
 export async function getContractState(
   contractAddress: string,
-): Promise<{ address: string; state: unknown }> {
-  // v4 indexer uses contractAction query with address parameter
+): Promise<ContractActionInfo> {
   const data = await graphql(
     `
       query ($address: HexEncoded!) {
         contractAction(address: $address) {
+          __typename
           address
-          actions { transaction { hash } }
+          state
+          zswapState
+          unshieldedBalances { tokenType amount }
+          ... on ContractCall { entryPoint }
+          transaction {
+            hash
+            protocolVersion
+            block { height timestamp }
+            ... on RegularTransaction {
+              fees { paidFees estimatedFees }
+            }
+          }
         }
       }
     `,
@@ -401,17 +489,32 @@ export async function getContractState(
   const ca = data.contractAction as Record<string, unknown> | null;
   if (!ca) throw new Error(`Contract ${contractAddress} not found`);
 
-  // For full contract state, use the RPC method instead
-  let rpcState: unknown = null;
-  try {
-    rpcState = await getContractStateRpc(contractAddress);
-  } catch {
-    // RPC state query may not be available for all contracts
-  }
+  const tx = (ca.transaction as Record<string, unknown>) ?? {};
+  const block = (tx.block as Record<string, unknown>) ?? {};
+  const fees = (tx.fees as Record<string, unknown>) ?? {};
+  const balances =
+    (ca.unshieldedBalances as Array<Record<string, unknown>>) ?? [];
+  const state = (ca.state as string) ?? '';
 
   return {
     address: ca.address as string,
-    state: rpcState ?? ca,
+    actionType: (ca.__typename as string) ?? 'unknown',
+    state,
+    zswapState: (ca.zswapState as string) ?? '',
+    unshieldedBalances: balances.map((bal) => ({
+      tokenType: String(bal.tokenType ?? ''),
+      amount: String(bal.amount ?? '0'),
+    })),
+    entryPoint: (ca.entryPoint as string) ?? null,
+    circuits: decodeContractCircuits(state),
+    tx: {
+      hash: (tx.hash as string) ?? '',
+      protocolVersion: (tx.protocolVersion as number) ?? 0,
+      blockHeight: (block.height as number) ?? 0,
+      blockTimestamp: String(block.timestamp ?? ''),
+      paidFees: (fees.paidFees as string) ?? null,
+      estimatedFees: (fees.estimatedFees as string) ?? null,
+    },
   };
 }
 
